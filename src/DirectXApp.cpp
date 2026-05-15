@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_6.h>
+#include <algorithm>
 #include <string>
 #include "../h/ThrowIfFailed.h"
 #include "../h/Parser.h"
@@ -14,6 +15,15 @@
 #pragma comment(lib, "d3dcompiler.lib")
 
 using namespace DirectX;
+
+namespace
+{
+    bool IsCurtainMaterialName(const std::string& materialName)
+    {
+        return materialName.find("curtain") != std::string::npos ||
+               materialName.find("fabric") != std::string::npos;
+    }
+}
 
 struct CD3DX12_RESOURCE_BARRIER_HELPER {
     static D3D12_RESOURCE_BARRIER Transition(
@@ -186,33 +196,39 @@ void DirectXApp::BuildConstantBuffer()
     // Upload Buffer
     mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(
         device.Get(),
-        1,
+        static_cast<UINT>(std::max<size_t>(1, mSubmeshes.size())),
         true
     );
 
-    // Initialization of matrix
-    ObjectConstants objConstants;
-    XMMATRIX view = XMMatrixIdentity();
-    XMMATRIX proj = XMMatrixOrthographicLH(10.0f, 10.0f, 0.1f, 100.0f);
-    XMMATRIX viewProj = view * proj;
-    XMStoreFloat4x4(&objConstants.mWorldViewProj, XMMatrixTranspose(viewProj));
-
-    // Initialization UV transform
-    objConstants.mUVTransform = XMFLOAT4(2.0f, 2.0f, 0.0f, 0.0f); // scale 2x для тайлинга
-
-    mObjectCB->CopyData(0, objConstants);
-
-    // Make CBV (Constant Buffer View) in a heap of descriptors
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-    D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
-
-    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-    cbvDesc.BufferLocation = cbAddress;
-    cbvDesc.SizeInBytes = objCBByteSize;
-
-    // Getting descriptors from CBV heap
     D3D12_CPU_DESCRIPTOR_HANDLE cbvHandle = mCbvHeap->GetCPUDescriptorHandleForHeapStart();
-    device->CreateConstantBufferView(&cbvDesc, cbvHandle);
+
+    for (UINT i = 0; i < std::max<UINT>(1, static_cast<UINT>(mSubmeshes.size())); ++i)
+    {
+        ObjectConstants objConstants;
+        XMMATRIX view = XMMatrixIdentity();
+        XMMATRIX proj = XMMatrixOrthographicLH(10.0f, 10.0f, 0.1f, 100.0f);
+        XMMATRIX viewProj = view * proj;
+        XMStoreFloat4x4(&objConstants.mWorldViewProj, XMMatrixTranspose(viewProj));
+        objConstants.mUVTransform = XMFLOAT4(2.0f, 2.0f, 0.0f, 0.0f);
+
+        const bool isCurtain = i < mSubmeshes.size() && IsCurtainMaterialName(mSubmeshes[i].MaterialName);
+        objConstants.mCurtainParams = XMFLOAT4(
+            0.0f,
+            isCurtain ? 0.08f : 0.0f,
+            3.5f,
+            1.8f);
+
+        mObjectCB->CopyData(i, objConstants);
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+        cbvDesc.BufferLocation = mObjectCB->Resource()->GetGPUVirtualAddress() + i * objCBByteSize;
+        cbvDesc.SizeInBytes = objCBByteSize;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE currentHandle = cbvHandle;
+        currentHandle.ptr += i * mCbvSrvUavDescriptorSize;
+        device->CreateConstantBufferView(&cbvDesc, currentHandle);
+    }
 
     MessageBox(NULL, L"Constant buffer and CBV created", L"Info", MB_OK);
 }
@@ -737,7 +753,7 @@ bool DirectXApp::CreateDescriptorHeaps() {
 
     // 3. CBV/SRV/UAV куча
     D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc;
-    cbvHeapDesc.NumDescriptors = 1 + 200; // 1 CBV + 1 SRV
+    cbvHeapDesc.NumDescriptors = 1024; // запас под CBV для submesh и SRV для материалов
     cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     cbvHeapDesc.NodeMask = 0;
@@ -867,6 +883,7 @@ bool DirectXApp::Initialize() {
     LoadMTL("../assets/sponza.mtl", parsed);
 
     UINT srvIndex = 0;
+    const UINT materialSrvOffset = std::max<UINT>(1, static_cast<UINT>(mSubmeshes.size()));
 
     for (auto& p : parsed)
     {
@@ -894,7 +911,7 @@ bool DirectXApp::Initialize() {
         D3D12_CPU_DESCRIPTOR_HANDLE hDescriptor =
             mCbvHeap->GetCPUDescriptorHandleForHeapStart();
 
-        hDescriptor.ptr += (1 + mat.SrvHeapIndex) * mCbvSrvUavDescriptorSize;
+        hDescriptor.ptr += (materialSrvOffset + mat.SrvHeapIndex) * mCbvSrvUavDescriptorSize;
 
         device->CreateShaderResourceView(
             mat.DiffuseTexture.Get(),
@@ -1105,17 +1122,26 @@ void DirectXApp::Update(const Timer& gt)
     XMMATRIX world = XMMatrixIdentity();
     XMMATRIX worldViewProj = world * view * proj;
 
-    ObjectConstants objConstants;
-    XMStoreFloat4x4(&objConstants.mWorldViewProj,
-        XMMatrixTranspose(worldViewProj));
+    for (UINT i = 0; i < mSubmeshes.size(); ++i)
+    {
+        ObjectConstants objConstants;
+        XMStoreFloat4x4(&objConstants.mWorldViewProj,
+            XMMatrixTranspose(worldViewProj));
 
-    // Устанавливаем UV transform для тайлинга и анимации
-    objConstants.mUVTransform.x = mUVScaleU;  // scaleU
-    objConstants.mUVTransform.y = mUVScaleV;  // scaleV
-    objConstants.mUVTransform.z = mUVOffsetU; // offsetU
-    objConstants.mUVTransform.w = mUVOffsetV; // offsetV
+        objConstants.mUVTransform.x = mUVScaleU;
+        objConstants.mUVTransform.y = mUVScaleV;
+        objConstants.mUVTransform.z = mUVOffsetU;
+        objConstants.mUVTransform.w = mUVOffsetV;
 
-    mObjectCB->CopyData(0, objConstants);
+        const bool isCurtain = IsCurtainMaterialName(mSubmeshes[i].MaterialName);
+        objConstants.mCurtainParams = XMFLOAT4(
+            gt.TotalTime(),
+            isCurtain ? 0.08f : 0.0f,
+            3.5f,
+            1.8f);
+
+        mObjectCB->CopyData(i, objConstants);
+    }
 }
 
 void DirectXApp::Draw(const Timer& gt)
@@ -1161,17 +1187,19 @@ void DirectXApp::Draw(const Timer& gt)
     ID3D12DescriptorHeap* heaps[] = { mCbvHeap.Get() };
     mCommandList->SetDescriptorHeaps(1, heaps);
 
-    // CBV (b0)
-    mCommandList->SetGraphicsRootDescriptorTable(
-        0,
-        mCbvHeap->GetGPUDescriptorHandleForHeapStart());
-
     mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     mCommandList->IASetVertexBuffers(0, 1, &mVertexBufferView);
     mCommandList->IASetIndexBuffer(&mIndexBufferView);
 
-    for (auto& sm : mSubmeshes)
+    for (UINT submeshIndex = 0; submeshIndex < mSubmeshes.size(); ++submeshIndex)
     {
+        auto& sm = mSubmeshes[submeshIndex];
+
+        D3D12_GPU_DESCRIPTOR_HANDLE cbvHandle =
+            mCbvHeap->GetGPUDescriptorHandleForHeapStart();
+        cbvHandle.ptr += submeshIndex * mCbvSrvUavDescriptorSize;
+        mCommandList->SetGraphicsRootDescriptorTable(0, cbvHandle);
+
         // 🔎 Найти материал
         Material* mat = nullptr;
 
@@ -1199,7 +1227,8 @@ void DirectXApp::Draw(const Timer& gt)
         D3D12_GPU_DESCRIPTOR_HANDLE srvHandle =
             mCbvHeap->GetGPUDescriptorHandleForHeapStart();
 
-        srvHandle.ptr += (1 + mat->SrvHeapIndex) * mCbvSrvUavDescriptorSize;
+        const UINT materialSrvOffset = std::max<UINT>(1, static_cast<UINT>(mSubmeshes.size()));
+        srvHandle.ptr += (materialSrvOffset + mat->SrvHeapIndex) * mCbvSrvUavDescriptorSize;
 
         mCommandList->SetGraphicsRootDescriptorTable(1, srvHandle);
 
