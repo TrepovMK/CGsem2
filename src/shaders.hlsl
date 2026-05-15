@@ -5,6 +5,7 @@ cbuffer cbPerObject : register(b0)
 {
     float4x4 mWorldViewProj;
     float4 mUVTransform;  // x = scaleU, y = scaleV, z = offsetU, w = offsetV
+    float4 mCurtainParams; // x = time, y = amplitude, z = spatial frequency, w = speed
 };
 
 struct VSInput
@@ -23,7 +24,18 @@ struct PSInput
 PSInput VS(VSInput vin)
 {
     PSInput vout;
-    vout.PosH = mul(float4(vin.Pos, 1.0f), mWorldViewProj);
+
+    float pinned = saturate(vin.Tex.y);
+    float freeEdge = 1.0f - pinned;
+    float wavePhase = vin.Pos.x * mCurtainParams.z + vin.Pos.y * 1.35f + mCurtainParams.x * mCurtainParams.w;
+    float secondaryPhase = vin.Pos.z * (mCurtainParams.z * 0.5f) - mCurtainParams.x * (mCurtainParams.w * 0.7f);
+    float flutter = sin(wavePhase) + 0.5f * sin(secondaryPhase);
+
+    float3 animatedPos = vin.Pos;
+    animatedPos.z += flutter * mCurtainParams.y * freeEdge;
+    animatedPos.x += cos(wavePhase * 0.6f) * (mCurtainParams.y * 0.35f) * freeEdge;
+
+    vout.PosH = mul(float4(animatedPos, 1.0f), mWorldViewProj);
 
     vout.TexC = vin.Tex * mUVTransform.xy + mUVTransform.zw;
 
