@@ -50,6 +50,7 @@ public:
     }
 
     ID3D12Resource* Resource() const { return mUploadBuffer.Get(); }
+    UINT GetElementSize() const { return mElementByteSize; }
 
     void CopyData(int elementIndex, const T& data)
     {
