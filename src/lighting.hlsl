@@ -1,117 +1,135 @@
-Texture2D gAlbedoMap : register(t0);
-Texture2D gNormalMap : register(t1);
-Texture2D gDepthMap : register(t2);
-SamplerState gSampler : register(s0);
+Texture2D gAlbedoTex : register(t0);
+Texture2D gNormalTex : register(t1);
+Texture2D gDepthTex : register(t2);
+SamplerState gLinearClamp : register(s0);
 
-cbuffer cbLighting : register(b0)
+cbuffer PassConstants : register(b0)
 {
-    float3 gLightPos;
-    float gLightIntensity;
-    float3 gLightColor;
-    float gLightRange;
-    float3 gLightDir;
-    float gSpotAngle;
-    float3 gAmbientColor;
-    int gLightType;
-    float3 gCameraPos;
-    float padding;
+    float4x4 gInvViewProj;
+    float3 gEyePosW;
+    float gPassPadding;
+    float4 gAmbientColor;
 };
 
-cbuffer cbCamera : register(b1)
+struct LightData
 {
-    float4x4 mInvViewProj;
-    float3 mCameraPos;
-    float padding1;
-    float2 mScreenSize;
-    float2 padding2;
+    float3 Position;
+    float Range;
+    float3 Direction;
+    float SpotAngle;
+    float3 Color;
+    float Intensity;
+    uint Type;
+    float3 Padding;
 };
 
-static const int LIGHT_AMBIENT = 0;
-static const int LIGHT_DIRECTIONAL = 1;
-static const int LIGHT_POINT = 2;
-static const int LIGHT_SPOT = 3;
-
-struct VSInput
+cbuffer LightConstants : register(b1)
 {
-    uint vertexId : SV_VertexID;
+    LightData gLight;
+    uint gEnableAmbient;
+    float3 gDummy;
 };
 
-struct PSInput
+struct VSOut
 {
     float4 PosH : SV_POSITION;
     float2 TexC : TEXCOORD;
 };
 
-float3 ReconstructWorldPos(float2 texCoord, float depth, float4x4 invViewProj)
+VSOut VS_Fullscreen(uint vid : SV_VertexID)
 {
-    float x = texCoord.x * 2.0f - 1.0f;
-    float y = (1.0f - texCoord.y) * 2.0f - 1.0f;
-    float4 clipPos = float4(x, y, depth, 1.0f);
-    float4 worldPos = mul(clipPos, invViewProj);
-    return worldPos.xyz / max(worldPos.w, 1e-5f);
-}
-
-PSInput VS(VSInput vin)
-{
-    PSInput vout;
-    float2 texCoord = float2((vin.vertexId << 1) & 2, vin.vertexId & 2);
-    vout.TexC = texCoord;
-    vout.PosH = float4(texCoord.x * 2.0f - 1.0f, -(texCoord.y * 2.0f - 1.0f), 0.0f, 1.0f);
+    VSOut vout;
+    float2 pos[3] = { float2(-1, -1), float2(-1, 3), float2(3, -1) };
+    float2 uv[3] = { float2(0, 1), float2(0, -1), float2(2, 1) };
+    vout.PosH = float4(pos[vid], 0, 1);
+    vout.TexC = uv[vid];
     return vout;
 }
 
-float4 PS(PSInput pin) : SV_Target
+float3 ReconstructWorldPos(float2 uv, float depth, float4x4 invViewProj)
 {
-    float4 albedo = gAlbedoMap.Sample(gSampler, pin.TexC);
-    float3 normal = normalize(gNormalMap.Sample(gSampler, pin.TexC).xyz);
-    float depth = gDepthMap.Sample(gSampler, pin.TexC).r;
+    float2 ndc = uv * 2.0f - 1.0f;
+    ndc.y = -ndc.y;
+    float4 clip = float4(ndc, depth, 1.0f);
+    float4 world = mul(clip, invViewProj);
+    return world.xyz / world.w;
+}
 
-    if (depth > 0.99999f)
+float3 ComputeDirectional(float3 N, float3 albedo, LightData light)
+{
+    float3 L = normalize(-light.Direction);
+    float ndotl = saturate(dot(N, L));
+    return albedo * light.Color * (light.Intensity * ndotl);
+}
+
+float3 ComputePoint(float3 P, float3 N, float3 albedo, LightData light)
+{
+    float3 toLight = light.Position - P;
+    float dist = length(toLight);
+    if (dist > light.Range)
     {
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return float3(0.0f, 0.0f, 0.0f);
     }
 
-    float3 worldPos = ReconstructWorldPos(pin.TexC, depth, mInvViewProj);
-    float3 result = float3(0.0f, 0.0f, 0.0f);
+    float3 L = toLight / max(dist, 1e-4f);
+    float ndotl = saturate(dot(N, L));
+    float atten = saturate(1.0f - dist / max(light.Range, 1e-4f));
+    atten *= atten;
 
-    if (gLightType == LIGHT_AMBIENT)
-    {
-        result = albedo.rgb * gAmbientColor;
-    }
-    else if (gLightType == LIGHT_DIRECTIONAL)
-    {
-        float3 lightDir = normalize(-gLightDir);
-        float diff = max(dot(normal, lightDir), 0.0f);
-        result = diff * gLightColor * gLightIntensity * albedo.rgb;
-    }
-    else if (gLightType == LIGHT_POINT)
-    {
-        float3 lightDir = gLightPos - worldPos;
-        float distance = length(lightDir);
-        lightDir = normalize(lightDir);
-        float attenuation = 1.0f - saturate(distance / gLightRange);
-        attenuation *= attenuation;
-        float diff = max(dot(normal, lightDir), 0.0f);
-        result = diff * gLightColor * gLightIntensity * albedo.rgb * attenuation;
-    }
-    else if (gLightType == LIGHT_SPOT)
-    {
-        float3 lightDir = gLightPos - worldPos;
-        float distance = length(lightDir);
-        lightDir = normalize(lightDir);
-        float3 spotDir = normalize(gLightDir);
-        float cosAngle = dot(lightDir, spotDir);
-        float cosCone = cos(gSpotAngle * 0.5f);
+    return albedo * light.Color * (light.Intensity * ndotl * atten);
+}
 
-        if (cosAngle > cosCone)
+float3 ComputeSpot(float3 P, float3 N, float3 albedo, LightData light)
+{
+    float3 toLight = light.Position - P;
+    float dist = length(toLight);
+    if (dist > light.Range)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    float3 L = toLight / max(dist, 1e-4f);
+    float cone = dot(normalize(-light.Direction), L);
+    float spot = smoothstep(light.SpotAngle, light.SpotAngle + 0.08f, cone);
+
+    float ndotl = saturate(dot(N, L));
+    float atten = saturate(1.0f - dist / max(light.Range, 1e-4f));
+    atten *= atten;
+
+    return albedo * light.Color * (light.Intensity * ndotl * atten * spot);
+}
+
+float4 PS_Lighting(VSOut pin) : SV_Target
+{
+    float2 uv = pin.TexC;
+    float3 albedo = gAlbedoTex.Sample(gLinearClamp, uv).rgb;
+    float3 normalPacked = gNormalTex.Sample(gLinearClamp, uv).rgb;
+    float depth = gDepthTex.Sample(gLinearClamp, uv).r;
+
+    float3 normalW = normalize(normalPacked * 2.0f - 1.0f);
+    float3 worldPos = ReconstructWorldPos(uv, depth, gInvViewProj);
+
+    float3 color = float3(0.0f, 0.0f, 0.0f);
+
+    if (gEnableAmbient != 0)
+    {
+        color = gAmbientColor.rgb * albedo;
+    }
+    else
+    {
+        if (gLight.Type == 0)
         {
-            float attenuation = 1.0f - saturate(distance / gLightRange);
-            attenuation *= attenuation;
-            float spotFactor = saturate((cosAngle - cosCone) / (1.0f - cosCone));
-            float diff = max(dot(normal, lightDir), 0.0f);
-            result = diff * gLightColor * gLightIntensity * albedo.rgb * attenuation * spotFactor;
+            color = ComputeDirectional(normalW, albedo, gLight);
+        }
+        else if (gLight.Type == 1)
+        {
+            color = ComputePoint(worldPos, normalW, albedo, gLight);
+        }
+        else if (gLight.Type == 2)
+        {
+            color = ComputeSpot(worldPos, normalW, albedo, gLight);
         }
     }
 
-    return float4(result, 0.0f);
+    return float4(color, 0.0f);
 }

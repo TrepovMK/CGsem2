@@ -1,29 +1,30 @@
 #pragma once
 
-#include <DirectXMath.h>
-#include <d3d12.h>
-#include <d3dcompiler.h>
-#include <dxgi1_6.h>
-#include <memory>
-#include <string>
-#include <vector>
-#include <windows.h>
-#include <wrl/client.h>
-#include "../h/CameraConstants.h"
-#include "../h/ObjectConstants.h"
-#include "../h/Timer.h"
-#include "../h/UploadBuffer.h"
-#include "../h/vertex.h"
 #include "Light.h"
-#include "Material.h"
-#include "MathHelper.h"
+#include "UploadBuffer.h"
+#include "mesh_data.h"
 #include "RenderingSystem.h"
-#include "Submesh.h"
-#include "ThrowIfFailed.h"
-#include "Window.h"
 
-using Microsoft::WRL::ComPtr;
+#include <array>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl.h>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <DirectXMath.h>
+
+#include "../h/ObjectConstants.h"
+#include "../h/CameraConstants.h"
+#include "../h/Timer.h"
+#include "../h/Vertex.h"
+#include "../h/Material.h"
+#include "../h/Submesh.h"
+#include "../h/ThrowIfFailed.h"
+#include "../h/Window.h"
+
 using namespace DirectX;
+using Microsoft::WRL::ComPtr;
 
 class DirectXApp
 {
@@ -37,7 +38,7 @@ public:
     virtual bool InitializeApp();
     virtual void Update(const Timer& gt);
     virtual void Draw(const Timer& gt);
-    void BuildObj(const std::string& path);
+    void BuildScene();
     virtual void CalculateFrameStats();
     void StopTimer() { mTimer.Stop(); }
     void StartTimer() { mTimer.Start(); }
@@ -52,28 +53,91 @@ public:
     DirectXApp* GetDirectXApp() const { return dxApp; }
 
 private:
-    std::vector<Light> mLights;
-    std::unique_ptr<RenderingSystem> mRenderingSystem;
-    std::unique_ptr<UploadBuffer<CameraConstants>> mCameraCB;
+    void LoadModels();
+    void BuildGeometryBuffers();
+    void LoadTextures();
+    void CreateFallbackTextures();
+    void BindSubmeshTextures();
+    void BuildConstantBuffers();
+    void BuildMainSrvHeap();
+    void BuildLights();
+    void UpdateCamera(float dt);
+    void FlushCommandQueue();
 
-    float mYaw = 0.0f;
-    float mPitch = 0.0f;
-    float mUVOffsetU = 0.0f;
-    float mUVOffsetV = 0.0f;
-    float mUVScaleU = 1.0f;
-    float mUVScaleV = 1.0f;
-    bool mAnimateTextures = false;
+    D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView() const;
+    D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView() const { return mDsvHeap->GetCPUDescriptorHandleForHeapStart(); }
+    ID3D12Resource* CurrentBackBuffer() const;
+    D3D12_GPU_DESCRIPTOR_HANDLE GetGpuSrvHandle(unsigned int heapIndex) const;
 
-    std::vector<Submesh> mSubmeshes;
-    std::vector<Material> mMaterials;
-    void CreateTextureFromTGA(const std::string& path, Microsoft::WRL::ComPtr<ID3D12Resource>& texture);
-    void CreateColorTexture(const DirectX::XMFLOAT3& color, Microsoft::WRL::ComPtr<ID3D12Resource>& texture);
-    bool IsCurtainMaterialName(const std::string& materialName) const;
-    UINT GetMaterialSrvOffset() const;
+    bool CreateDXGIFactory();
+    bool GetHardwareAdapter();
+    bool CreateD3DDevice();
+    bool CreateCommandObjects();
+    bool CreateFence();
+    bool CreateSwapChain();
+    void QueryDescriptorSizes();
+    bool CreateDescriptorHeaps();
+    bool CreateRenderTargetViews();
+    bool CreateDepthStencilBuffer();
+    void CreateViewportAndScissor();
+    void SetViewportAndScissor();
+
+    struct TextureResource {
+        std::wstring path;
+        ComPtr<ID3D12Resource> resource;
+        ComPtr<ID3D12Resource> uploadHeap;
+        unsigned int srvHeapIndex = 0;
+    };
+
+    static constexpr unsigned int SwapChainBufferCount = 2;
+    static constexpr unsigned int LightingCbElementCount = 2048;
 
     DirectXApp* dxApp = nullptr;
-    XMFLOAT3 mEyePos = XMFLOAT3(0.0f, 0.0f, 0.0f);
     Window& window;
+
+    std::unique_ptr<RenderingSystem> mRenderingSystem;
+    std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB;
+    std::unique_ptr<UploadBuffer<PassConstants>> mPassCB;
+    std::unique_ptr<UploadBuffer<LightingConstants>> mLightingCB;
+
+    MeshData mSceneMesh;
+    ComPtr<ID3D12Resource> mVertexBufferGPU;
+    ComPtr<ID3D12Resource> mVertexBufferUploader;
+    ComPtr<ID3D12Resource> mIndexBufferGPU;
+    ComPtr<ID3D12Resource> mIndexBufferUploader;
+
+    D3D12_VERTEX_BUFFER_VIEW mVertexBufferView = {};
+    D3D12_INDEX_BUFFER_VIEW mIndexBufferView = {};
+
+    std::vector<TextureResource> mTextureResources;
+    std::unordered_map<std::string, unsigned int> mTextureNameToIndex;
+
+    unsigned int mFallbackDiffuseIndex = 0;
+    unsigned int mFallbackNormalIndex = 0;
+    unsigned int mFallbackDisplacementIndex = 0;
+
+    unsigned int mTextureSrvStart = 3;
+    unsigned int mGBufferSrvStart = 0;
+
+    std::vector<LightData> mLights;
+
+    XMFLOAT3 mEyePos = {0.0f, 2.0f, -12.0f};
+    float mYaw = 0.0f;
+    float mPitch = 0.0f;
+    POINT mLastMousePos = {0, 0};
+
+    int mDebugViewMode = 1;
+    bool mF1WasDown = false;
+    bool mF2WasDown = false;
+    bool mF3WasDown = false;
+    bool mTWasDown = false;
+    bool mRWasDown = false;
+    bool mAnimateTextures = false;
+    float mTexAnimU = 0.0f;
+    float mTexAnimV = 0.0f;
+    float mTexScaleU = 1.0f;
+    float mTexScaleV = 1.0f;
+    int mLastTitleMode = -1;
 
     ComPtr<IDXGIFactory4> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
@@ -85,7 +149,6 @@ private:
     UINT64 mFenceValue = 0;
 
     ComPtr<IDXGISwapChain> mSwapChain;
-    static const int SwapChainBufferCount = 2;
     ComPtr<ID3D12Resource> mSwapChainBuffer[SwapChainBufferCount];
     int mCurrBackBuffer = 0;
 
@@ -101,8 +164,8 @@ private:
     DXGI_FORMAT mBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     DXGI_FORMAT mDepthStencilFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
-    int mClientWidth = 800;
-    int mClientHeight = 600;
+    int mClientWidth = 1280;
+    int mClientHeight = 720;
     D3D12_VIEWPORT mScreenViewport;
     D3D12_RECT mScissorRect;
 
@@ -111,50 +174,7 @@ private:
     bool mResizing = false;
     int mFrameCount = 0;
     float mTimeElapsed = 0.0f;
-    std::wstring mMainWndCaption = L"DirectX 12 Framework";
+    std::wstring mMainWndCaption = L"DirectX 12 Tessellation";
 
-    std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
-    ComPtr<ID3D12Resource> mVertexBufferGPU;
-    ComPtr<ID3D12Resource> mVertexBufferUploader;
-    D3D12_VERTEX_BUFFER_VIEW mVertexBufferView;
-    ComPtr<ID3D12Resource> mIndexBufferGPU;
-    ComPtr<ID3D12Resource> mIndexBufferUploader;
-    D3D12_INDEX_BUFFER_VIEW mIndexBufferView;
-
-    ComPtr<ID3DBlob> mvsByteCode = nullptr;
-    ComPtr<ID3DBlob> mpsByteCode = nullptr;
-    std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
-    ComPtr<ID3D12RootSignature> mRootSignature;
-    ComPtr<ID3D12PipelineState> mPSO;
-    ComPtr<ID3D12PipelineState> mWireframePSO;
-    bool mWireframeMode = false;
-
-    POINT mLastMousePos;
-    XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
-    XMFLOAT4X4 mView = MathHelper::Identity4x4();
-    XMFLOAT4X4 mProj = MathHelper::Identity4x4();
-    UINT mIndexCount = 0;
-
-    bool CreateDXGIFactory();
-    bool GetHardwareAdapter();
-    bool CreateD3DDevice();
-    bool CreateCommandObjects();
-    bool CreateFence();
-    void FlushCommandQueue();
-    bool CreateSwapChain();
-    void QueryDescriptorSizes();
-    bool CreateDescriptorHeaps();
-    bool CreateRenderTargetViews();
-    bool CreateDepthStencilBuffer();
-    void CreateViewportAndScissor();
-    void SetViewportAndScissor();
-    void BuildInputLayout();
-    void BuildShaders();
-    void BuildConstantBuffer();
-    void BuildRootSignature();
-    void BuildPSO();
-    void BuildWireframePSO();
-    ID3D12Resource* CurrentBackBuffer() const;
-    D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView() const;
-    D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView() const { return mDsvHeap->GetCPUDescriptorHandleForHeapStart(); }
+    ID3D12Resource* CurrentBackBufferResource() const { return mSwapChainBuffer[mCurrBackBuffer].Get(); }
 };

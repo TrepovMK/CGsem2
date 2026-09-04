@@ -2,20 +2,10 @@
 
 #include <DirectXMath.h>
 
-struct CameraConstants
+struct PassConstants
 {
-    DirectX::XMFLOAT4X4 mInvViewProj;
-    DirectX::XMFLOAT3 mCameraPos;
-    float mPadding1;
-    DirectX::XMFLOAT2 mScreenSize;
-    DirectX::XMFLOAT2 mPadding;
-
-    CameraConstants()
-        : mCameraPos(0.0f, 0.0f, 0.0f)
-        , mPadding1(0.0f)
-        , mScreenSize(800.0f, 600.0f)
-        , mPadding(0.0f, 0.0f)
-    {
-        DirectX::XMStoreFloat4x4(&mInvViewProj, DirectX::XMMatrixIdentity());
-    }
+    DirectX::XMFLOAT4X4 InvViewProj = {};
+    DirectX::XMFLOAT3 EyePosW = {0.0f, 0.0f, 0.0f};
+    float Padding = 0.0f;
+    DirectX::XMFLOAT4 AmbientColor = {0.08f, 0.08f, 0.1f, 1.0f};
 };

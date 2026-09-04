@@ -18,11 +18,16 @@ public:
 
     bool Initialize(ID3D12Device* device, UINT width, UINT height);
     void Shutdown();
+    void OnResize(ID3D12Device* device, UINT width, UINT height);
+
+    void CreateSrvs(ID3D12Device* device,
+                    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart,
+                    unsigned int gpuStartIndex,
+                    unsigned int descriptorSize);
 
     ID3D12Resource* GetTexture(GBUFFER_TEXTURE_TYPE type) const { return mTextures[type].Get(); }
     D3D12_CPU_DESCRIPTOR_HANDLE GetRTV(GBUFFER_TEXTURE_TYPE type) const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(GBUFFER_TEXTURE_TYPE type) const;
-    ID3D12DescriptorHeap* GetSrvHeap() const { return mSrvHeap.Get(); }
 
     void ClearRenderTargets(
         ID3D12GraphicsCommandList* cmdList,
@@ -33,11 +38,9 @@ public:
 private:
     bool CreateTextures(ID3D12Device* device);
     bool CreateRTVs(ID3D12Device* device);
-    bool CreateSRVs(ID3D12Device* device);
 
     ComPtr<ID3D12Resource> mTextures[GBUFFER_COUNT];
     ComPtr<ID3D12DescriptorHeap> mRtvHeap;
-    ComPtr<ID3D12DescriptorHeap> mSrvHeap;
 
     UINT mRtvDescriptorSize = 0;
     UINT mCbvSrvDescriptorSize = 0;

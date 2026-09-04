@@ -8,7 +8,17 @@ bool GBuffer::Initialize(ID3D12Device* device, UINT width, UINT height)
     mRtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     mCbvSrvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    return CreateTextures(device) && CreateRTVs(device) && CreateSRVs(device);
+    return CreateTextures(device) && CreateRTVs(device);
+}
+
+void GBuffer::OnResize(ID3D12Device* device, UINT width, UINT height)
+{
+    if (mWidth == width && mHeight == height) return;
+    mWidth = width;
+    mHeight = height;
+    for (auto& texture : mTextures) texture.Reset();
+    CreateTextures(device);
+    CreateRTVs(device);
 }
 
 bool GBuffer::CreateTextures(ID3D12Device* device)
@@ -78,16 +88,11 @@ bool GBuffer::CreateRTVs(ID3D12Device* device)
     return true;
 }
 
-bool GBuffer::CreateSRVs(ID3D12Device* device)
+void GBuffer::CreateSrvs(ID3D12Device* device,
+                         D3D12_CPU_DESCRIPTOR_HANDLE cpuStart,
+                         unsigned int gpuStartIndex,
+                         unsigned int descriptorSize)
 {
-    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-    heapDesc.NumDescriptors = GBUFFER_COUNT;
-    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-
-    ThrowIfFailed(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&mSrvHeap)));
-
-    D3D12_CPU_DESCRIPTOR_HANDLE handle = mSrvHeap->GetCPUDescriptorHandleForHeapStart();
     for (int i = 0; i < GBUFFER_COUNT; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -96,11 +101,11 @@ bool GBuffer::CreateSRVs(ID3D12Device* device)
         srvDesc.Texture2D.MipLevels = 1;
         srvDesc.Format = (i == GBUFFER_ALBEDO) ? mAlbedoFormat :
                          (i == GBUFFER_NORMAL) ? mNormalFormat : mDepthFormat;
-        device->CreateShaderResourceView(mTextures[i].Get(), &srvDesc, handle);
-        handle.ptr += mCbvSrvDescriptorSize;
-    }
 
-    return true;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = cpuStart;
+        handle.ptr += static_cast<SIZE_T>(i) * descriptorSize;
+        device->CreateShaderResourceView(mTextures[i].Get(), &srvDesc, handle);
+    }
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetRTV(GBUFFER_TEXTURE_TYPE type) const
@@ -112,7 +117,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetRTV(GBUFFER_TEXTURE_TYPE type) const
 
 D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetSRV(GBUFFER_TEXTURE_TYPE type) const
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE handle = mSrvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = mRtvHeap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr += type * mCbvSrvDescriptorSize;
     return handle;
 }
@@ -124,8 +129,8 @@ void GBuffer::ClearRenderTargets(
     const float* clearColorDepth)
 {
     const float defaultAlbedo[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    const float defaultNormal[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    const float defaultDepth[] = { 1.0f, 0.0f, 0.0f, 0.0f };
+    const float defaultNormal[] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    const float defaultDepth[] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
     cmdList->ClearRenderTargetView(GetRTV(GBUFFER_ALBEDO), clearColorAlbedo ? clearColorAlbedo : defaultAlbedo, 0, nullptr);
     cmdList->ClearRenderTargetView(GetRTV(GBUFFER_NORMAL), clearColorNormal ? clearColorNormal : defaultNormal, 0, nullptr);
@@ -139,5 +144,4 @@ void GBuffer::Shutdown()
         texture.Reset();
     }
     mRtvHeap.Reset();
-    mSrvHeap.Reset();
 }
