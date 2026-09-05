@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 #include <DirectXMath.h>
+#include <DirectXCollision.h>
+#include <random>
 
 #include "../h/ObjectConstants.h"
 #include "../h/CameraConstants.h"
@@ -54,6 +56,7 @@ public:
 
 private:
     void LoadModels();
+    void LoadSponzaModel();
     void BuildGeometryBuffers();
     void LoadTextures();
     void CreateFallbackTextures();
@@ -63,6 +66,15 @@ private:
     void BuildLights();
     void UpdateCamera(float dt);
     void FlushCommandQueue();
+
+    void ActivateScene(int index, bool resetCamera);
+    void BuildScenePresets();
+    void RebuildSceneObjectTransforms();
+    void BuildOctree();
+    void InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex, int depth);
+    void CollectVisibleObjects();
+    void CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& frustum);
+    void UpdateWindowTitle();
 
     D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView() const;
     D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView() const { return mDsvHeap->GetCPUDescriptorHandleForHeapStart(); }
@@ -89,8 +101,44 @@ private:
         unsigned int srvHeapIndex = 0;
     };
 
+    struct ModelAsset {
+        std::string name;
+        unsigned int startIndex = 0;
+        unsigned int submeshCount = 0;
+        XMFLOAT3 localCenter = {0, 0, 0};
+        XMFLOAT3 localExtents = {0, 0, 0};
+        float localRadius = 0;
+    };
+
+    struct SceneObject {
+        int modelIndex = -1;
+        XMFLOAT3 position = {0, 0, 0};
+        float scale = 1.0f;
+        float rotationY = 0.0f;
+        XMFLOAT4X4 world = {};
+        BoundingBox worldBounds;
+    };
+
+    struct ScenePreset {
+        std::wstring name;
+        std::vector<SceneObject> objects;
+        XMFLOAT3 cameraPos = {0, 0, 0};
+        float cameraYaw = 0.0f;
+        float cameraPitch = 0.0f;
+    };
+
+    struct OctreeNode {
+        XMFLOAT3 center = {0, 0, 0};
+        XMFLOAT3 extents = {0, 0, 0};
+        BoundingBox bounds;
+        std::vector<unsigned int> objectIndices;
+        int children[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    };
+
     static constexpr unsigned int SwapChainBufferCount = 2;
     static constexpr unsigned int LightingCbElementCount = 2048;
+    static constexpr int kMaxOctreeDepth = 8;
+    static constexpr int kMaxLeafObjects = 28;
 
     DirectXApp* dxApp = nullptr;
     Window& window;
@@ -121,6 +169,21 @@ private:
 
     std::vector<LightData> mLights;
 
+    std::vector<ModelAsset> mModelAssets;
+
+    std::vector<ScenePreset> mScenePresets;
+    std::vector<SceneObject> mSceneObjects;
+    int mActiveSceneIndex = 0;
+
+    bool mFrustumCullingEnabled = false;
+    bool mOctreeCullingEnabled = false;
+    std::vector<unsigned int> mVisibleObjects;
+
+    std::vector<OctreeNode> mOctreeNodes;
+
+    int mObjectsTestedThisFrame = 0;
+    int mOctreeNodesVisitedThisFrame = 0;
+
     XMFLOAT3 mEyePos = {0.0f, 2.0f, -12.0f};
     float mYaw = 0.0f;
     float mPitch = 0.0f;
@@ -132,7 +195,13 @@ private:
     bool mF3WasDown = false;
     bool mTWasDown = false;
     bool mRWasDown = false;
+    bool mCWasDown = false;
+    bool mOWasDown = false;
+    bool mDigit1WasDown = false;
+    bool mDigit2WasDown = false;
+    bool mDigit3WasDown = false;
     bool mAnimateTextures = false;
+    bool mTitleDirty = true;
     float mTexAnimU = 0.0f;
     float mTexAnimV = 0.0f;
     float mTexScaleU = 1.0f;

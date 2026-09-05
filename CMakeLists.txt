@@ -51,7 +51,6 @@ set(SHADER_FILES
 add_executable(CG_Sem2
     ${SRC_FILES}
     ${HEADER_FILES}
-    ${SHADER_FILES}
 )
 
 target_include_directories(CG_Sem2 PRIVATE

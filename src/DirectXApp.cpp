@@ -1,5 +1,6 @@
 #include "../h/DirectXApp.h"
 #include <DirectXMath.h>
+#include <DirectXCollision.h>
 #include <algorithm>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -10,7 +11,11 @@
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+#include <random>
+#include <functional>
+#include <fstream>
 #include "../h/DDSTextureLoader.h"
+
 #include "../h/model_loader.h"
 #include "../h/d3dUtil.h"
 
@@ -46,6 +51,70 @@ namespace
             sm.startIndexLocation += indexOffset;
             sm.baseVertexLocation = 0;
             dst.submeshes.push_back(sm);
+        }
+    }
+
+    struct MeshBounds {
+        XMFLOAT3 center = {0.0f, 0.0f, 0.0f};
+        XMFLOAT3 extents = {1.0f, 1.0f, 1.0f};
+        float radius = 1.0f;
+    };
+
+    MeshBounds ComputeMeshBounds(const MeshData& mesh) {
+        MeshBounds bounds{};
+        if (mesh.vertices.empty()) {
+            return bounds;
+        }
+
+        XMFLOAT3 vMin(
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max());
+        XMFLOAT3 vMax(
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max());
+
+        for (const auto& v : mesh.vertices) {
+            vMin.x = (std::min)(vMin.x, v.Position.x);
+            vMin.y = (std::min)(vMin.y, v.Position.y);
+            vMin.z = (std::min)(vMin.z, v.Position.z);
+
+            vMax.x = (std::max)(vMax.x, v.Position.x);
+            vMax.y = (std::max)(vMax.y, v.Position.y);
+            vMax.z = (std::max)(vMax.z, v.Position.z);
+        }
+
+        bounds.center = XMFLOAT3(
+            0.5f * (vMin.x + vMax.x),
+            0.5f * (vMin.y + vMax.y),
+            0.5f * (vMin.z + vMax.z));
+        bounds.extents = XMFLOAT3(
+            0.5f * (vMax.x - vMin.x),
+            0.5f * (vMax.y - vMin.y),
+            0.5f * (vMax.z - vMin.z));
+
+        float radius = 0.0f;
+        for (const auto& v : mesh.vertices) {
+            const float dx = v.Position.x - bounds.center.x;
+            const float dy = v.Position.y - bounds.center.y;
+            const float dz = v.Position.z - bounds.center.z;
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            radius = (std::max)(radius, d);
+        }
+
+        bounds.radius = (radius > 1e-5f) ? radius : 1.0f;
+        return bounds;
+    }
+
+    void NormalizeMeshToRadius(MeshData& mesh, float targetRadius, float yOffset) {
+        const MeshBounds originalBounds = ComputeMeshBounds(mesh);
+        const float normalizeScale = (originalBounds.radius > 1e-5f) ? (targetRadius / originalBounds.radius) : 1.0f;
+
+        for (auto& v : mesh.vertices) {
+            v.Position.x = (v.Position.x - originalBounds.center.x) * normalizeScale;
+            v.Position.y = (v.Position.y - originalBounds.center.y) * normalizeScale + yOffset;
+            v.Position.z = (v.Position.z - originalBounds.center.z) * normalizeScale;
         }
     }
 
@@ -103,6 +172,194 @@ namespace
 
         return defaultBuffer;
     }
+
+    bool LoadTgaTextureFromFile12(
+        ID3D12Device* device,
+        ID3D12GraphicsCommandList* cmdList,
+        const std::wstring& filePath,
+        ComPtr<ID3D12Resource>& texture,
+        ComPtr<ID3D12Resource>& uploadHeap) {
+        std::ifstream file(std::filesystem::path(filePath), std::ios::binary);
+        if (!file) {
+            return false;
+        }
+
+        unsigned char header[18] = {};
+        file.read(reinterpret_cast<char*>(header), sizeof(header));
+        if (!file) {
+            return false;
+        }
+
+        const unsigned char idLength = header[0];
+        const unsigned char colorMapType = header[1];
+        const unsigned char imageType = header[2];
+        const unsigned short width = static_cast<unsigned short>(header[12] | (header[13] << 8));
+        const unsigned short height = static_cast<unsigned short>(header[14] | (header[15] << 8));
+        const unsigned char bpp = header[16];
+        const unsigned char descriptor = header[17];
+
+        if (colorMapType != 0 || width == 0 || height == 0) {
+            return false;
+        }
+        const bool supportedType = (imageType == 2 || imageType == 3 || imageType == 10 || imageType == 11);
+        if (!supportedType) {
+            return false;
+        }
+        if (bpp != 8 && bpp != 24 && bpp != 32) {
+            return false;
+        }
+
+        if (idLength > 0) {
+            file.seekg(idLength, std::ios::cur);
+            if (!file) {
+                return false;
+            }
+        }
+
+        const unsigned int pixelCount = static_cast<unsigned int>(width) * static_cast<unsigned int>(height);
+        std::vector<unsigned char> rgba(pixelCount * 4u, 255u);
+
+        const auto writePixel = [&](unsigned int pixelIndex, const unsigned char* src) {
+            const unsigned int dst = pixelIndex * 4u;
+            if (bpp == 32) {
+                rgba[dst + 0] = src[2];
+                rgba[dst + 1] = src[1];
+                rgba[dst + 2] = src[0];
+                rgba[dst + 3] = src[3];
+            } else if (bpp == 24) {
+                rgba[dst + 0] = src[2];
+                rgba[dst + 1] = src[1];
+                rgba[dst + 2] = src[0];
+                rgba[dst + 3] = 255;
+            } else {
+                rgba[dst + 0] = src[0];
+                rgba[dst + 1] = src[0];
+                rgba[dst + 2] = src[0];
+                rgba[dst + 3] = 255;
+            }
+        };
+
+        const unsigned int bytesPerPixel = bpp / 8u;
+        std::vector<unsigned char> pixel(bytesPerPixel);
+        unsigned int pixelIndex = 0;
+
+        if (imageType == 2 || imageType == 3) {
+            while (pixelIndex < pixelCount) {
+                file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+                if (!file) {
+                    return false;
+                }
+                writePixel(pixelIndex, pixel.data());
+                ++pixelIndex;
+            }
+        } else {
+            while (pixelIndex < pixelCount) {
+                unsigned char packetHeader = 0;
+                file.read(reinterpret_cast<char*>(&packetHeader), 1);
+                if (!file) {
+                    return false;
+                }
+
+                const unsigned int runLength = (packetHeader & 0x7Fu) + 1u;
+                if (packetHeader & 0x80u) {
+                    file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+                    if (!file) {
+                        return false;
+                    }
+                    for (unsigned int i = 0; i < runLength && pixelIndex < pixelCount; ++i, ++pixelIndex) {
+                        writePixel(pixelIndex, pixel.data());
+                    }
+                } else {
+                    for (unsigned int i = 0; i < runLength && pixelIndex < pixelCount; ++i, ++pixelIndex) {
+                        file.read(reinterpret_cast<char*>(pixel.data()), bytesPerPixel);
+                        if (!file) {
+                            return false;
+                        }
+                        writePixel(pixelIndex, pixel.data());
+                    }
+                }
+            }
+        }
+
+        const bool topOrigin = (descriptor & 0x20u) != 0u;
+        if (!topOrigin) {
+            const unsigned int rowPitch = static_cast<unsigned int>(width) * 4u;
+            std::vector<unsigned char> flipped(rgba.size());
+            for (unsigned int y = 0; y < static_cast<unsigned int>(height); ++y) {
+                const unsigned int srcOffset = (static_cast<unsigned int>(height) - 1u - y) * rowPitch;
+                const unsigned int dstOffset = y * rowPitch;
+                std::copy_n(rgba.data() + srcOffset, rowPitch, flipped.data() + dstOffset);
+            }
+            rgba.swap(flipped);
+        }
+
+        D3D12_RESOURCE_DESC texDesc = {};
+        texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texDesc.Width = width;
+        texDesc.Height = height;
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        D3D12_HEAP_PROPERTIES defaultHeapProps = {};
+        defaultHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        if (FAILED(device->CreateCommittedResource(
+            &defaultHeapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &texDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&texture)))) {
+            return false;
+        }
+
+        const UINT64 uploadSize = GetRequiredIntermediateSize(texture.Get(), 0, 1);
+
+        D3D12_HEAP_PROPERTIES uploadHeapProps = {};
+        uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        D3D12_RESOURCE_DESC uploadDesc = {};
+        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        uploadDesc.Width = uploadSize;
+        uploadDesc.Height = 1;
+        uploadDesc.DepthOrArraySize = 1;
+        uploadDesc.MipLevels = 1;
+        uploadDesc.SampleDesc.Count = 1;
+        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        if (FAILED(device->CreateCommittedResource(
+            &uploadHeapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &uploadDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&uploadHeap)))) {
+            return false;
+        }
+
+        const UINT rowPitch = static_cast<UINT>(width) * 4u;
+        const UINT imageSize = rowPitch * static_cast<UINT>(height);
+        D3D12_SUBRESOURCE_DATA subresource = {};
+        subresource.pData = rgba.data();
+        subresource.RowPitch = rowPitch;
+        subresource.SlicePitch = imageSize;
+
+        UpdateSubresources(cmdList, texture.Get(), uploadHeap.Get(), 0, 0, 1, &subresource);
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmdList->ResourceBarrier(1, &barrier);
+
+        return true;
+    }
 }
 
 DirectXApp::DirectXApp(Window& window) : window(window)
@@ -152,6 +409,7 @@ void DirectXApp::OnKeyDown(WPARAM wParam)
     if (wParam == 'T')
     {
         mAnimateTextures = !mAnimateTextures;
+        mTitleDirty = true;
     }
 
     if (wParam == 'R')
@@ -160,11 +418,12 @@ void DirectXApp::OnKeyDown(WPARAM wParam)
         mTexScaleV = 1.0f;
         mTexAnimU = 0.0f;
         mTexAnimV = 0.0f;
+        mTitleDirty = true;
     }
 
-    if (wParam == VK_F1) mDebugViewMode = 1;
-    if (wParam == VK_F2) mDebugViewMode = 2;
-    if (wParam == VK_F3) mDebugViewMode = 3;
+    if (wParam == VK_F1) { mDebugViewMode = 1; mTitleDirty = true; }
+    if (wParam == VK_F2) { mDebugViewMode = 2; mTitleDirty = true; }
+    if (wParam == VK_F3) { mDebugViewMode = 3; mTitleDirty = true; }
 }
 
 void DirectXApp::BuildScene()
@@ -176,6 +435,9 @@ void DirectXApp::BuildScene()
     BuildGeometryBuffers();
     LoadTextures();
     CreateFallbackTextures();
+
+    BuildScenePresets();
+    ActivateScene(0, false);
 
     BuildConstantBuffers();
     BuildMainSrvHeap();
@@ -194,73 +456,455 @@ void DirectXApp::BuildScene()
 void DirectXApp::LoadModels()
 {
     mSceneMesh = {};
+    mModelAssets.clear();
 
-    std::filesystem::path earthPath = "../assets/Earth.fbx";
-    if (!std::filesystem::exists(earthPath)) {
-        earthPath = "../assets/earth.fbx";
+    struct ModelLoadSpec {
+        std::string name;
+        std::vector<std::string> candidates;
+        float targetRadius = 1.0f;
+        float yOffset = 0.0f;
+        bool forceEarthMaterial = false;
+    };
+
+    const std::vector<ModelLoadSpec> loadSpecs = {
+        {
+            "earth",
+            {"../assets/Earth.fbx", "../assets/earth.fbx"},
+            3.5f,
+            0.0f,
+            true
+        },
+        {
+            "sponza",
+            {"../assets/sponza/sponza.obj", "../assets/sponza.obj"},
+            18.0f,
+            0.0f,
+            false
+        }
+    };
+
+    for (const auto& spec : loadSpecs) {
+        std::string resolvedPath;
+        bool found = false;
+        for (const auto& candidate : spec.candidates) {
+            if (std::filesystem::exists(candidate)) {
+                resolvedPath = candidate;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std::string warn = "Model not found: " + spec.name + "\n";
+            OutputDebugStringA(warn.c_str());
+            continue;
+        }
+
+        auto mesh = ModelLoader::LoadModel(resolvedPath, XMMatrixIdentity());
+        NormalizeMeshToRadius(mesh, spec.targetRadius, spec.yOffset);
+
+        if (spec.forceEarthMaterial) {
+            for (auto& sm : mesh.submeshes) {
+                sm.material.diffuseTextureName = "Earth_ALB";
+                sm.material.normalTextureName = "Earth_NORM";
+                sm.material.displacementTextureName = "Earth_HEIGHT";
+                sm.material.shininess = 64.0f;
+            }
+        }
+
+        const MeshBounds bounds = ComputeMeshBounds(mesh);
+        ModelAsset asset;
+        asset.name = spec.name;
+        asset.startIndex = static_cast<unsigned int>(mSceneMesh.submeshes.size());
+        asset.submeshCount = static_cast<unsigned int>(mesh.submeshes.size());
+        asset.localCenter = bounds.center;
+        asset.localExtents = bounds.extents;
+        asset.localRadius = bounds.radius;
+        mModelAssets.push_back(asset);
+
+        AppendMeshData(mSceneMesh, mesh);
+
+        std::string msg = "Loaded model: " + spec.name + " submeshes=" + std::to_string(asset.submeshCount) + "\n";
+        OutputDebugStringA(msg.c_str());
     }
-    if (!std::filesystem::exists(earthPath)) {
-        throw std::runtime_error("Earth.fbx not found in ../assets");
+
+    if (mModelAssets.empty()) {
+        throw std::runtime_error("No models loaded");
+    }
+}
+
+void DirectXApp::BuildScenePresets()
+{
+    mScenePresets.clear();
+
+    auto findModelIndex = [&](const std::string& modelName) -> unsigned int {
+        const std::string key = ToLowerAscii(modelName);
+        for (unsigned int i = 0; i < static_cast<unsigned int>(mModelAssets.size()); ++i) {
+            if (ToLowerAscii(mModelAssets[i].name) == key) {
+                return i;
+            }
+        }
+        return 0;
+    };
+
+    const unsigned int earthModel = findModelIndex("earth");
+    const unsigned int sponzaModel = findModelIndex("sponza");
+    const bool hasSponza = ToLowerAscii(mModelAssets[sponzaModel].name) == "sponza";
+
+    ScenePreset scene1;
+    scene1.name = L"Scene 1: Single Earth";
+    scene1.cameraPos = XMFLOAT3(0.0f, 2.8f, -15.0f);
+    scene1.cameraYaw = 0.0f;
+    scene1.cameraPitch = 0.0f;
+    {
+        SceneObject earth;
+        earth.modelIndex = earthModel;
+        earth.position = XMFLOAT3(0.0f, 0.6f, 0.0f);
+        earth.scale = 1.0f;
+        earth.rotationY = 0.0f;
+        scene1.objects.push_back(earth);
+    }
+    mScenePresets.push_back(scene1);
+
+    ScenePreset scene2;
+    scene2.name = L"Scene 2: Multi-Model (81 Earths)";
+    scene2.cameraPos = XMFLOAT3(0.0f, 6.5f, -36.0f);
+    scene2.cameraYaw = 0.0f;
+    scene2.cameraPitch = -0.08f;
+    {
+        if (hasSponza) {
+            SceneObject sponza;
+            sponza.modelIndex = sponzaModel;
+            sponza.position = XMFLOAT3(0.0f, -6.0f, 0.0f);
+            sponza.scale = 1.0f;
+            sponza.rotationY = 0.0f;
+            scene2.objects.push_back(sponza);
+        }
+
+        const int rows = 9;
+        const int cols = 9;
+        const float spacing = 7.0f;
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                SceneObject earth;
+                earth.modelIndex = earthModel;
+                earth.position = XMFLOAT3(
+                    (static_cast<float>(c) - (cols - 1) * 0.5f) * spacing,
+                    1.0f + ((r + c) % 3) * 0.35f,
+                    (static_cast<float>(r) - (rows - 1) * 0.5f) * spacing);
+                earth.scale = 0.35f + 0.1f * static_cast<float>((r + c) % 4);
+                earth.rotationY = 0.25f * static_cast<float>((r * cols + c) % 7);
+                scene2.objects.push_back(earth);
+            }
+        }
+    }
+    mScenePresets.push_back(scene2);
+
+    ScenePreset scene3;
+    scene3.name = L"Scene 3: Stress Test (1000 Earths)";
+    scene3.cameraPos = XMFLOAT3(0.0f, 8.5f, -46.0f);
+    scene3.cameraYaw = 0.0f;
+    scene3.cameraPitch = -0.02f;
+    {
+        if (hasSponza) {
+            SceneObject sponza;
+            sponza.modelIndex = sponzaModel;
+            sponza.position = XMFLOAT3(0.0f, -5.8f, 0.0f);
+            sponza.scale = 0.85f;
+            sponza.rotationY = 0.0f;
+            scene3.objects.push_back(sponza);
+        }
+
+        std::mt19937 rng(20260501u);
+        std::uniform_real_distribution<float> xzDist(-55.0f, 55.0f);
+        std::uniform_real_distribution<float> yDist(0.0f, 5.0f);
+        std::uniform_real_distribution<float> scaleDist(0.12f, 0.3f);
+        std::uniform_real_distribution<float> rotDist(0.0f, XM_2PI);
+
+        const unsigned int objectCount = 1000;
+        for (unsigned int i = 0; i < objectCount; ++i) {
+            SceneObject earth;
+            earth.modelIndex = earthModel;
+            earth.position = XMFLOAT3(xzDist(rng), yDist(rng), xzDist(rng));
+            earth.scale = scaleDist(rng);
+            earth.rotationY = rotDist(rng);
+            scene3.objects.push_back(earth);
+        }
+    }
+    mScenePresets.push_back(scene3);
+}
+
+void DirectXApp::ActivateScene(int index, bool resetCamera)
+{
+    if (mScenePresets.empty()) {
+        return;
     }
 
-    auto mesh = ModelLoader::LoadModel(
-        earthPath.u8string(),
-        XMMatrixIdentity());
+    mActiveSceneIndex = (std::min)(static_cast<unsigned int>(index),
+                                   static_cast<unsigned int>(mScenePresets.size() - 1));
+    const ScenePreset& preset = mScenePresets[mActiveSceneIndex];
+    mSceneObjects = preset.objects;
 
-    XMFLOAT3 vMin(
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max());
-    XMFLOAT3 vMax(
-        -std::numeric_limits<float>::max(),
-        -std::numeric_limits<float>::max(),
-        -std::numeric_limits<float>::max());
-
-    for (const auto& v : mesh.vertices) {
-        vMin.x = (std::min)(vMin.x, v.Position.x);
-        vMin.y = (std::min)(vMin.y, v.Position.y);
-        vMin.z = (std::min)(vMin.z, v.Position.z);
-
-        vMax.x = (std::max)(vMax.x, v.Position.x);
-        vMax.y = (std::max)(vMax.y, v.Position.y);
-        vMax.z = (std::max)(vMax.z, v.Position.z);
+    if (resetCamera) {
+        mEyePos = preset.cameraPos;
+        mYaw = preset.cameraYaw;
+        mPitch = preset.cameraPitch;
     }
 
-    const XMFLOAT3 center(
-        0.5f * (vMin.x + vMax.x),
-        0.5f * (vMin.y + vMax.y),
-        0.5f * (vMin.z + vMax.z));
+    mAnimateTextures = false;
+    mTexAnimU = 0.0f;
+    mTexAnimV = 0.0f;
+    mTexScaleU = 1.0f;
+    mTexScaleV = 1.0f;
 
-    float radius = 0.0f;
-    for (const auto& v : mesh.vertices) {
-        const float dx = v.Position.x - center.x;
-        const float dy = v.Position.y - center.y;
-        const float dz = v.Position.z - center.z;
-        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-        radius = (std::max)(radius, d);
+    RebuildSceneObjectTransforms();
+    BuildOctree();
+    mVisibleObjects.resize(mSceneObjects.size());
+    for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+        mVisibleObjects[i] = i;
     }
 
-    const float targetRadius = 3.5f;
-    const float normalizeScale = (radius > 1e-4f) ? (targetRadius / radius) : 1.0f;
+    BuildConstantBuffers();
+    BuildMainSrvHeap();
+    BindSubmeshTextures();
+    mTitleDirty = true;
+}
 
-    for (auto& v : mesh.vertices) {
-        v.Position.x = (v.Position.x - center.x) * normalizeScale;
-        v.Position.y = (v.Position.y - center.y) * normalizeScale + targetRadius * 0.15f;
-        v.Position.z = (v.Position.z - center.z) * normalizeScale;
+void DirectXApp::RebuildSceneObjectTransforms()
+{
+    for (auto& obj : mSceneObjects) {
+        const XMMATRIX world =
+            XMMatrixScaling(obj.scale, obj.scale, obj.scale) *
+            XMMatrixRotationY(obj.rotationY) *
+            XMMatrixTranslation(obj.position.x, obj.position.y, obj.position.z);
+        XMStoreFloat4x4(&obj.world, world);
+
+        const ModelAsset& model = mModelAssets[obj.modelIndex];
+        const BoundingBox localBounds(model.localCenter, model.localExtents);
+        BoundingBox worldBounds;
+        localBounds.Transform(worldBounds, world);
+        obj.worldBounds = worldBounds;
+    }
+}
+
+void DirectXApp::BuildOctree()
+{
+    mOctreeNodes.clear();
+    if (mSceneObjects.empty()) {
+        return;
     }
 
-    for (auto& sm : mesh.submeshes) {
-        sm.material.diffuseTextureName = "Earth_ALB";
-        sm.material.normalTextureName = "Earth_NORM";
-        sm.material.displacementTextureName = "Earth_HEIGHT";
-        sm.material.shininess = 64.0f;
+    BoundingBox sceneBounds = mSceneObjects[0].worldBounds;
+    for (unsigned int i = 1; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+        BoundingBox::CreateMerged(sceneBounds, sceneBounds, mSceneObjects[i].worldBounds);
     }
 
-    AppendMeshData(mSceneMesh, mesh);
+    XMFLOAT3 center = sceneBounds.Center;
+    XMFLOAT3 extents = sceneBounds.Extents;
+    extents.x = (std::max)(extents.x, 1.0f);
+    extents.y = (std::max)(extents.y, 1.0f);
+    extents.z = (std::max)(extents.z, 1.0f);
+    extents.x *= 1.001f;
+    extents.y *= 1.001f;
+    extents.z *= 1.001f;
 
-    mEyePos = XMFLOAT3(0.0f, targetRadius * 0.8f, -targetRadius * 4.5f);
-    mYaw = 0.0f;
-    mPitch = 0.0f;
+    OctreeNode rootNode;
+    rootNode.center = center;
+    rootNode.extents = extents;
+    rootNode.bounds = BoundingBox(center, extents);
+    mOctreeNodes.push_back(std::move(rootNode));
+
+    for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+        InsertObjectIntoOctree(i, 0, 0);
+    }
+}
+
+void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex, int depth)
+{
+    if (depth >= kMaxOctreeDepth) {
+        mOctreeNodes[nodeIndex].objectIndices.push_back(objectIndex);
+        return;
+    }
+
+    const SceneObject& object = mSceneObjects[objectIndex];
+
+    if (static_cast<int>(mOctreeNodes[nodeIndex].objectIndices.size()) >= kMaxLeafObjects &&
+        depth < kMaxOctreeDepth) {
+        if (mOctreeNodes[nodeIndex].children[0] == -1) {
+            XMFLOAT3 parentCenter = mOctreeNodes[nodeIndex].center;
+            XMFLOAT3 childExtents(mOctreeNodes[nodeIndex].extents.x * 0.5f, mOctreeNodes[nodeIndex].extents.y * 0.5f, mOctreeNodes[nodeIndex].extents.z * 0.5f);
+            for (int i = 0; i < 8; ++i) {
+                OctreeNode child;
+                child.extents = childExtents;
+                child.center = XMFLOAT3(
+                    parentCenter.x + ((i & 1) ? childExtents.x : -childExtents.x),
+                    parentCenter.y + ((i & 2) ? childExtents.y : -childExtents.y),
+                    parentCenter.z + ((i & 4) ? childExtents.z : -childExtents.z));
+                child.bounds = BoundingBox(child.center, child.extents);
+                mOctreeNodes[nodeIndex].children[i] = static_cast<int>(mOctreeNodes.size());
+                mOctreeNodes.push_back(std::move(child));
+            }
+
+            auto storedObjects = mOctreeNodes[nodeIndex].objectIndices;
+            mOctreeNodes[nodeIndex].objectIndices.clear();
+            for (unsigned int idx : storedObjects) {
+                InsertObjectIntoOctree(idx, nodeIndex, depth);
+            }
+        }
+    }
+
+    XMFLOAT3 nodeCenter = mOctreeNodes[nodeIndex].center;
+    XMFLOAT3 nodeExtents = mOctreeNodes[nodeIndex].extents;
+    const XMFLOAT3 childExtents(nodeExtents.x * 0.5f, nodeExtents.y * 0.5f, nodeExtents.z * 0.5f);
+    unsigned int targetChild = 0;
+    targetChild |= (object.worldBounds.Center.x >= nodeCenter.x) ? 1u : 0u;
+    targetChild |= (object.worldBounds.Center.y >= nodeCenter.y) ? 2u : 0u;
+    targetChild |= (object.worldBounds.Center.z >= nodeCenter.z) ? 4u : 0u;
+
+    XMFLOAT3 nextCenter(
+        nodeCenter.x + ((targetChild & 1) ? childExtents.x : -childExtents.x),
+        nodeCenter.y + ((targetChild & 2) ? childExtents.y : -childExtents.y),
+        nodeCenter.z + ((targetChild & 4) ? childExtents.z : -childExtents.z));
+    BoundingBox childBounds(nextCenter, childExtents);
+
+    if (childBounds.Contains(object.worldBounds) == CONTAINS) {
+        if (mOctreeNodes[nodeIndex].children[targetChild] == -1) {
+            OctreeNode child;
+            child.extents = childExtents;
+            child.center = nextCenter;
+            child.bounds = childBounds;
+            mOctreeNodes[nodeIndex].children[targetChild] = static_cast<int>(mOctreeNodes.size());
+            mOctreeNodes.push_back(std::move(child));
+        }
+        InsertObjectIntoOctree(objectIndex, mOctreeNodes[nodeIndex].children[targetChild], depth + 1);
+    } else {
+        mOctreeNodes[nodeIndex].objectIndices.push_back(objectIndex);
+    }
+}
+
+void DirectXApp::CollectVisibleObjects()
+{
+    mVisibleObjects.clear();
+    mObjectsTestedThisFrame = 0;
+    mOctreeNodesVisitedThisFrame = 0;
+
+    if (mSceneObjects.empty()) {
+        return;
+    }
+
+    const XMVECTOR forward = XMVector3Normalize(XMVectorSet(
+        std::cos(mPitch) * std::sin(mYaw),
+        std::sin(mPitch),
+        std::cos(mPitch) * std::cos(mYaw),
+        0.0f));
+    const XMVECTOR eye = XMLoadFloat3(&mEyePos);
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    const XMMATRIX view = XMMatrixLookToLH(eye, forward, up);
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
+        static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
+        0.1f, 5000.0f);
+
+    if (!mFrustumCullingEnabled) {
+        mVisibleObjects.reserve(mSceneObjects.size());
+        for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+            mVisibleObjects.push_back(i);
+        }
+        mObjectsTestedThisFrame = static_cast<unsigned int>(mSceneObjects.size());
+        return;
+    }
+
+    BoundingFrustum viewFrustum;
+    BoundingFrustum::CreateFromMatrix(viewFrustum, proj);
+    BoundingFrustum worldFrustum;
+    const XMMATRIX invView = XMMatrixInverse(nullptr, view);
+    viewFrustum.Transform(worldFrustum, invView);
+
+    if (mOctreeCullingEnabled && !mOctreeNodes.empty()) {
+        CollectVisibleFromOctree(0, worldFrustum);
+        return;
+    }
+
+    mVisibleObjects.reserve(mSceneObjects.size());
+    for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+        ++mObjectsTestedThisFrame;
+        if (worldFrustum.Contains(mSceneObjects[i].worldBounds) != DISJOINT) {
+            mVisibleObjects.push_back(i);
+        }
+    }
+}
+
+void DirectXApp::CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& frustum)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(mOctreeNodes.size())) {
+        return;
+    }
+
+    ++mOctreeNodesVisitedThisFrame;
+    const OctreeNode& node = mOctreeNodes[nodeIndex];
+
+    if (!frustum.Intersects(node.bounds)) {
+        return;
+    }
+
+    if (frustum.Contains(node.bounds) == CONTAINS) {
+        std::function<void(int)> gatherAll = [&](int idx) {
+            if (idx < 0 || idx >= static_cast<int>(mOctreeNodes.size())) return;
+            const OctreeNode& n = mOctreeNodes[idx];
+            mObjectsTestedThisFrame += static_cast<unsigned int>(n.objectIndices.size());
+            for (unsigned int objIdx : n.objectIndices) {
+                mVisibleObjects.push_back(objIdx);
+            }
+            for (int i = 0; i < 8; ++i) {
+                if (n.children[i] != -1) {
+                    gatherAll(n.children[i]);
+                }
+            }
+        };
+        gatherAll(nodeIndex);
+        return;
+    }
+
+    for (unsigned int objectIndex : node.objectIndices) {
+        ++mObjectsTestedThisFrame;
+        if (frustum.Contains(mSceneObjects[objectIndex].worldBounds) != DISJOINT) {
+            mVisibleObjects.push_back(objectIndex);
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        if (node.children[i] != -1) {
+            CollectVisibleFromOctree(node.children[i], frustum);
+        }
+    }
+}
+
+void DirectXApp::UpdateWindowTitle()
+{
+    std::wostringstream ws;
+    ws << L"DirectX 12 Tessellation";
+    if (!mScenePresets.empty() && mActiveSceneIndex < mScenePresets.size()) {
+        ws << L" | " << mScenePresets[mActiveSceneIndex].name;
+    }
+
+    if (mDebugViewMode == 2) {
+        ws << L" | F2: Normal Debug";
+    } else if (mDebugViewMode == 3) {
+        ws << L" | F3: Tess Debug + Wire";
+    } else {
+        ws << L" | F1: Default";
+    }
+
+    ws << L" | T: Anim " << (mAnimateTextures ? L"ON" : L"OFF");
+    ws << L" | C: Frustum " << (mFrustumCullingEnabled ? L"ON" : L"OFF");
+    ws << L" | O: Octree " << (mOctreeCullingEnabled ? L"ON" : L"OFF");
+
+    ws << L" | Visible " << mVisibleObjects.size() << L"/" << mSceneObjects.size();
+    ws << L" | Tested " << mObjectsTestedThisFrame;
+    if (mOctreeCullingEnabled) {
+        ws << L" | OctNodes " << mOctreeNodesVisitedThisFrame;
+    }
+
+    ws << L" | [1-3] Scenes";
+    SetWindowTextW(window.GetHandle(), ws.str().c_str());
 }
 
 void DirectXApp::BuildGeometryBuffers()
@@ -305,21 +949,33 @@ void DirectXApp::LoadTextures()
 
             const auto ext = ToLowerAscii(entry.path().extension().string());
             const bool isDDS = (ext == ".dds");
-            if (!isDDS) {
+            const bool isTGA = (ext == ".tga");
+            if (!isDDS && !isTGA) {
                 continue;
             }
 
             TextureResource tex;
             tex.path = entry.path().wstring();
 
-            const HRESULT hr = DirectX::CreateDDSTextureFromFile12(
-                device.Get(),
-                mCommandList.Get(),
-                tex.path.c_str(),
-                tex.resource,
-                tex.uploadHeap);
+            bool loaded = false;
+            if (isDDS) {
+                const HRESULT hr = DirectX::CreateDDSTextureFromFile12(
+                    device.Get(),
+                    mCommandList.Get(),
+                    tex.path.c_str(),
+                    tex.resource,
+                    tex.uploadHeap);
+                loaded = SUCCEEDED(hr);
+            } else if (isTGA) {
+                loaded = LoadTgaTextureFromFile12(
+                    device.Get(),
+                    mCommandList.Get(),
+                    tex.path,
+                    tex.resource,
+                    tex.uploadHeap);
+            }
 
-            if (FAILED(hr)) {
+            if (!loaded) {
                 continue;
             }
 
@@ -431,7 +1087,8 @@ void DirectXApp::BindSubmeshTextures()
 
 void DirectXApp::BuildConstantBuffers()
 {
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device.Get(), 1, true);
+    const unsigned int objectCount = (std::max)(1u, static_cast<unsigned int>(mSceneObjects.size()));
+    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device.Get(), objectCount, true);
     mPassCB = std::make_unique<UploadBuffer<PassConstants>>(device.Get(), 1, true);
     mLightingCB = std::make_unique<UploadBuffer<LightingConstants>>(device.Get(), LightingCbElementCount, true);
 }
@@ -439,7 +1096,8 @@ void DirectXApp::BuildConstantBuffers()
 void DirectXApp::BuildMainSrvHeap()
 {
     const unsigned int textureCount = static_cast<unsigned int>(mTextureResources.size());
-    const unsigned int descriptorCount = 3 + textureCount + GBuffer::GBUFFER_COUNT;
+    const unsigned int objectCbvCount = (std::max)(1u, static_cast<unsigned int>(mSceneObjects.size()));
+    const unsigned int descriptorCount = objectCbvCount + 2 + textureCount + GBuffer::GBUFFER_COUNT;
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
     heapDesc.NumDescriptors = descriptorCount;
@@ -450,10 +1108,13 @@ void DirectXApp::BuildMainSrvHeap()
     D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = mCbvHeap->GetCPUDescriptorHandleForHeapStart();
 
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-    cbvDesc.BufferLocation = mObjectCB->Resource()->GetGPUVirtualAddress();
-    cbvDesc.SizeInBytes = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-    device->CreateConstantBufferView(&cbvDesc, cpuHandle);
-    cpuHandle.ptr += mCbvSrvUavDescriptorSize;
+    const unsigned int objectElementSize = mObjectCB->GetElementSize();
+    for (unsigned int i = 0; i < objectCbvCount; ++i) {
+        cbvDesc.BufferLocation = mObjectCB->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(i) * objectElementSize;
+        cbvDesc.SizeInBytes = objectElementSize;
+        device->CreateConstantBufferView(&cbvDesc, cpuHandle);
+        cpuHandle.ptr += mCbvSrvUavDescriptorSize;
+    }
 
     cbvDesc.BufferLocation = mPassCB->Resource()->GetGPUVirtualAddress();
     cbvDesc.SizeInBytes = d3dUtil::CalcConstantBufferByteSize(sizeof(PassConstants));
@@ -465,7 +1126,7 @@ void DirectXApp::BuildMainSrvHeap()
     device->CreateConstantBufferView(&cbvDesc, cpuHandle);
     cpuHandle.ptr += mCbvSrvUavDescriptorSize;
 
-    mTextureSrvStart = 3;
+    mTextureSrvStart = objectCbvCount + 2;
 
     for (unsigned int i = 0; i < textureCount; ++i) {
         auto& tex = mTextureResources[i];
@@ -829,10 +1490,11 @@ void DirectXApp::CalculateFrameStats()
         float fps = static_cast<float>(mFrameCount);
         float mspf = 1000.0f / fps;
 
-        std::wstring windowText = mMainWndCaption;
-        windowText += L" FPS: " + std::to_wstring(fps);
-        windowText += L" MSPF: " + std::to_wstring(mspf);
-        SetWindowText(window.GetHandle(), windowText.c_str());
+        std::wostringstream ws;
+        ws << L"DirectX 12 Tessellation";
+        ws << L" FPS: " << std::to_wstring(static_cast<int>(fps));
+        ws << L" MSPF: " << std::to_wstring(mspf);
+        SetWindowText(window.GetHandle(), ws.str().c_str());
 
         mFrameCount = 0;
         mTimeElapsed += 1.0f;
@@ -878,9 +1540,15 @@ void DirectXApp::Update(const Timer& gt)
 
     const bool tDown = (GetAsyncKeyState('T') & 0x8000) != 0;
     const bool rDown = (GetAsyncKeyState('R') & 0x8000) != 0;
+    const bool cDown = (GetAsyncKeyState('C') & 0x8000) != 0;
+    const bool oDown = (GetAsyncKeyState('O') & 0x8000) != 0;
+    const bool digit1Down = (GetAsyncKeyState('1') & 0x8000) != 0;
+    const bool digit2Down = (GetAsyncKeyState('2') & 0x8000) != 0;
+    const bool digit3Down = (GetAsyncKeyState('3') & 0x8000) != 0;
 
     if (tDown && !mTWasDown) {
         mAnimateTextures = !mAnimateTextures;
+        mTitleDirty = true;
     }
     mTWasDown = tDown;
 
@@ -890,8 +1558,39 @@ void DirectXApp::Update(const Timer& gt)
         mTexAnimV = 0.0f;
         mTexScaleU = 1.0f;
         mTexScaleV = 1.0f;
+        mTitleDirty = true;
     }
     mRWasDown = rDown;
+
+    if (cDown && !mCWasDown) {
+        mFrustumCullingEnabled = !mFrustumCullingEnabled;
+        mTitleDirty = true;
+    }
+    mCWasDown = cDown;
+
+    if (oDown && !mOWasDown) {
+        mOctreeCullingEnabled = !mOctreeCullingEnabled;
+        mTitleDirty = true;
+    }
+    mOWasDown = oDown;
+
+    if (digit1Down && !mDigit1WasDown) {
+        ActivateScene(0, true);
+        mTitleDirty = true;
+    }
+    mDigit1WasDown = digit1Down;
+
+    if (digit2Down && !mDigit2WasDown) {
+        ActivateScene(1, true);
+        mTitleDirty = true;
+    }
+    mDigit2WasDown = digit2Down;
+
+    if (digit3Down && !mDigit3WasDown) {
+        ActivateScene(2, true);
+        mTitleDirty = true;
+    }
+    mDigit3WasDown = digit3Down;
 
     if (GetAsyncKeyState('Y') & 0x8000) { mTexScaleU += dt * 1.2f; mTexScaleV += dt * 1.2f; }
     if (GetAsyncKeyState('H') & 0x8000) { mTexScaleU -= dt * 1.2f; mTexScaleV -= dt * 1.2f; }
@@ -903,19 +1602,11 @@ void DirectXApp::Update(const Timer& gt)
     mTexScaleU = std::clamp(mTexScaleU, 0.10f, 16.0f);
     mTexScaleV = std::clamp(mTexScaleV, 0.10f, 16.0f);
 
-    if (mDebugViewMode != mLastTitleMode) {
-        std::wostringstream ws;
-        ws << L"DirectX 12 Tessellation";
-        if (mDebugViewMode == 2) {
-            ws << L" | F2: Normal Debug";
-        } else if (mDebugViewMode == 3) {
-            ws << L" | F3: Tess Debug + Wireframe";
-        } else {
-            ws << L" | F1: Default";
-        }
-        ws << L" | T: Anim " << (mAnimateTextures ? L"ON" : L"OFF");
-        SetWindowTextW(window.GetHandle(), ws.str().c_str());
-        mLastTitleMode = mDebugViewMode;
+    if (mAnimateTextures) {
+        mTexAnimU += 0.04f * dt;
+        mTexAnimV += 0.015f * dt;
+        if (mTexAnimU > 1.0f) mTexAnimU -= 1.0f;
+        if (mTexAnimV > 1.0f) mTexAnimV -= 1.0f;
     }
 
     const XMVECTOR forward = XMVector3Normalize(XMVectorSet(
@@ -932,28 +1623,27 @@ void DirectXApp::Update(const Timer& gt)
                                                    static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
                                                    0.1f,
                                                    5000.0f);
-    const XMMATRIX world = XMMatrixIdentity();
-
-    if (mAnimateTextures) {
-        mTexAnimU += 0.04f * dt;
-        mTexAnimV += 0.015f * dt;
-        if (mTexAnimU > 1.0f) mTexAnimU -= 1.0f;
-        if (mTexAnimV > 1.0f) mTexAnimV -= 1.0f;
-    }
 
     const XMMATRIX texTransform =
         XMMatrixScaling(mTexScaleU, mTexScaleV, 1.0f) *
         XMMatrixTranslation(mTexAnimU, mTexAnimV, 0.0f);
 
-    ObjectConstants obj = {};
-    XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * view * proj));
-    XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
-    XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
-    obj.TotalTime = gt.TotalTime();
-    obj.Padding.x = static_cast<float>(mDebugViewMode);
-    obj.Padding.y = 0.06f;
-    obj.Padding.z = 0.0f;
-    mObjectCB->CopyData(0, obj);
+    CollectVisibleObjects();
+
+    for (unsigned int objectIndex : mVisibleObjects) {
+        const SceneObject& object = mSceneObjects[objectIndex];
+        const XMMATRIX world = XMLoadFloat4x4(&object.world);
+
+        ObjectConstants obj = {};
+        XMStoreFloat4x4(&obj.WorldViewProj, XMMatrixTranspose(world * view * proj));
+        XMStoreFloat4x4(&obj.World, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&obj.TextureTransform, XMMatrixTranspose(texTransform));
+        obj.TotalTime = gt.TotalTime();
+        obj.Padding.x = static_cast<float>(mDebugViewMode);
+        obj.Padding.y = 0.06f;
+        obj.Padding.z = 0.0f;
+        mObjectCB->CopyData(static_cast<int>(objectIndex), obj);
+    }
 
     PassConstants pass = {};
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
@@ -961,6 +1651,12 @@ void DirectXApp::Update(const Timer& gt)
     pass.EyePosW = mEyePos;
     pass.AmbientColor = XMFLOAT4(0.08f, 0.08f, 0.1f, 1.0f);
     mPassCB->CopyData(0, pass);
+
+    if (mTitleDirty || mDebugViewMode != mLastTitleMode) {
+        UpdateWindowTitle();
+        mLastTitleMode = mDebugViewMode;
+        mTitleDirty = false;
+    }
 }
 
 ID3D12Resource* DirectXApp::CurrentBackBuffer() const
@@ -1024,37 +1720,46 @@ void DirectXApp::Draw(const Timer& gt)
 
     mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetGeometryRootSignature());
 
-    mCommandList->SetGraphicsRootDescriptorTable(0, GetGpuSrvHandle(0));
-    mCommandList->SetGraphicsRootDescriptorTable(1, GetGpuSrvHandle(1));
+    const unsigned int objectCbvStart = 0;
+    const unsigned int passCbvIndex = objectCbvStart + (std::max)(1u, static_cast<unsigned int>(mSceneObjects.size()));
+    mCommandList->SetGraphicsRootDescriptorTable(1, GetGpuSrvHandle(passCbvIndex));
 
-    for (const auto& submesh : mSceneMesh.submeshes) {
-        const bool hasDisplacement = !submesh.material.displacementTextureName.empty() &&
-                                     submesh.material.displacementSrvHeapIndex !=
-                                         mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
-        const bool wireframeDebug = (mDebugViewMode == 3);
+    for (unsigned int objectIndex : mVisibleObjects) {
+        const SceneObject& object = mSceneObjects[objectIndex];
+        const ModelAsset& model = mModelAssets[object.modelIndex];
 
-        if (hasDisplacement) {
-            mCommandList->SetPipelineState(wireframeDebug
-                                               ? mRenderingSystem->GetTessellationWirePSO()
-                                               : mRenderingSystem->GetTessellationPSO());
-            mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
-        } else {
-            mCommandList->SetPipelineState(wireframeDebug
-                                               ? mRenderingSystem->GetGeometryWirePSO()
-                                               : mRenderingSystem->GetGeometryPSO());
-            mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        mCommandList->SetGraphicsRootDescriptorTable(0, GetGpuSrvHandle(objectCbvStart + objectIndex));
+
+        for (unsigned int submeshOffset = 0; submeshOffset < model.submeshCount; ++submeshOffset) {
+            const Submesh& submesh = mSceneMesh.submeshes[model.startIndex + submeshOffset];
+            const bool hasDisplacement = !submesh.material.displacementTextureName.empty() &&
+                                         submesh.material.displacementSrvHeapIndex !=
+                                             mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
+            const bool wireframeDebug = (mDebugViewMode == 3);
+
+            if (hasDisplacement) {
+                mCommandList->SetPipelineState(wireframeDebug
+                                                   ? mRenderingSystem->GetTessellationWirePSO()
+                                                   : mRenderingSystem->GetTessellationPSO());
+                mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+            } else {
+                mCommandList->SetPipelineState(wireframeDebug
+                                                   ? mRenderingSystem->GetGeometryWirePSO()
+                                                   : mRenderingSystem->GetGeometryPSO());
+                mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            }
+
+            mCommandList->SetGraphicsRootDescriptorTable(2, GetGpuSrvHandle(submesh.material.diffuseSrvHeapIndex));
+            mCommandList->SetGraphicsRootDescriptorTable(3, GetGpuSrvHandle(submesh.material.normalSrvHeapIndex));
+            mCommandList->SetGraphicsRootDescriptorTable(4, GetGpuSrvHandle(submesh.material.displacementSrvHeapIndex));
+
+            mCommandList->DrawIndexedInstanced(
+                submesh.indexCount,
+                1,
+                submesh.startIndexLocation,
+                submesh.baseVertexLocation,
+                0);
         }
-
-        mCommandList->SetGraphicsRootDescriptorTable(2, GetGpuSrvHandle(submesh.material.diffuseSrvHeapIndex));
-        mCommandList->SetGraphicsRootDescriptorTable(3, GetGpuSrvHandle(submesh.material.normalSrvHeapIndex));
-        mCommandList->SetGraphicsRootDescriptorTable(4, GetGpuSrvHandle(submesh.material.displacementSrvHeapIndex));
-
-        mCommandList->DrawIndexedInstanced(
-            submesh.indexCount,
-            1,
-            submesh.startIndexLocation,
-            submesh.baseVertexLocation,
-            0);
     }
 
     D3D12_RESOURCE_BARRIER toSrv[3] = {
