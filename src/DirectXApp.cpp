@@ -957,7 +957,9 @@ void DirectXApp::Draw(const Timer& gt)
         mScissorRect,
         mCurrBackBuffer,
         mSwapChain.Get(),
-        mCameraCB.get());
+        mCameraCB.get(),
+        0.1f,
+        1000.0f);
 
     FlushCommandQueue();
 }

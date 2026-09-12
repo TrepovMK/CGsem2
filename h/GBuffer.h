@@ -23,6 +23,7 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE GetRTV(GBUFFER_TEXTURE_TYPE type) const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(GBUFFER_TEXTURE_TYPE type) const;
     ID3D12DescriptorHeap* GetSrvHeap() const { return mSrvHeap.Get(); }
+    UINT GetSrvDescriptorSize() const { return mCbvSrvDescriptorSize; }
 
     void ClearRenderTargets(
         ID3D12GraphicsCommandList* cmdList,

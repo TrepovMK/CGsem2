@@ -56,13 +56,17 @@ public:
         const D3D12_RECT& scissorRect,
         int& currBackBufferIndex,
         IDXGISwapChain* swapChain,
-        UploadBuffer<CameraConstants>* cameraCB);
+        UploadBuffer<CameraConstants>* cameraCB,
+        float nearZ,
+        float farZ);
 
     GBuffer* GetGBuffer() const { return mGBuffer.get(); }
 
 private:
     bool CreateGBuffer(UINT width, UINT height);
     bool CreateLightingResources();
+    bool CreateDebugResources();
+    void RenderDebugOverlays(const D3D12_VIEWPORT& fullViewport, float nearZ, float farZ);
 
     ID3D12Device* mDevice;
     ID3D12CommandQueue* mCommandQueue;
@@ -77,4 +81,6 @@ private:
     std::unique_ptr<UploadBuffer<LightConstants>> mLightingCB;
     ComPtr<ID3D12PipelineState> mLightingPSO;
     ComPtr<ID3D12RootSignature> mLightingRootSignature;
+    ComPtr<ID3D12PipelineState> mDebugPSO;
+    ComPtr<ID3D12RootSignature> mDebugRootSignature;
 };
