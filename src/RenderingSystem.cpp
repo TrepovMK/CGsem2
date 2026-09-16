@@ -226,9 +226,10 @@ bool RenderingSystem::CreateShadowResources()
     psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
-    psoDesc.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
-    psoDesc.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
-    psoDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    // Смещение глубины против acne-полос: константное + по наклону полигона.
+    psoDesc.RasterizerState.DepthBias = 1000;
+    psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+    psoDesc.RasterizerState.SlopeScaledDepthBias = 1.0f;
     psoDesc.RasterizerState.DepthClipEnable = TRUE;
     psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
     psoDesc.BlendState.IndependentBlendEnable = FALSE;

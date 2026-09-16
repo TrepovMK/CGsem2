@@ -66,9 +66,9 @@ float3 ReconstructWorldPos(float2 texCoord, float depth, float4x4 invViewProj)
 // Выбор каскада по линеаризованной глубине + PCF 3x3 через SampleCmp.
 float ComputeShadowFactor(float3 worldPos, float3 normalW, float depth)
 {
-    // Линеаризация глубины (near/far должны совпадать с CPU: 0.1 / 1000).
+    // Линеаризация глубины (near/far должны совпадать с CPU: 0.1 / 200).
     const float nearZ = 0.1f;
-    const float farZ = 1000.0f;
+    const float farZ = 200.0f;
     float viewDepth = nearZ * farZ / (farZ - depth * (farZ - nearZ));
 
     int cascadeIndex = kNumCascades - 1;
@@ -95,7 +95,8 @@ float ComputeShadowFactor(float3 worldPos, float3 normalW, float depth)
 
     float3 lightDir = normalize(-gLightDirection.xyz);
     float ndotl = saturate(dot(normalW, lightDir));
-    float bias = (0.00005f + (1.0f - ndotl) * 0.00025f) * (1.0f + 0.18f * (float)cascadeIndex);
+    // Bias с запасом под тексель 1024-карт + рост по каскадам (дальние каскады грубее).
+    float bias = (0.0004f + (1.0f - ndotl) * 0.0015f) * (1.0f + 0.35f * (float)cascadeIndex);
 
     float shadow = 0.0f;
     float2 texelSize = 1.0f / kShadowMapSize;

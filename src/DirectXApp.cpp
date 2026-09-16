@@ -751,7 +751,7 @@ bool DirectXApp::Initialize()
     CreateShadowResources();
 
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
-        static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight), 1.0f, 1000.0f);
+        static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight), 1.0f, 200.0f);
     XMStoreFloat4x4(&mProj, P);
 
     mTimer.Reset();
@@ -889,7 +889,7 @@ void DirectXApp::Update(const Timer& gt)
         XM_PIDIV4,
         static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
         0.1f,
-        1000.0f);
+        200.0f);
 
     XMStoreFloat4x4(&mView, view);
     XMStoreFloat4x4(&mProj, proj);
@@ -975,7 +975,7 @@ void DirectXApp::Draw(const Timer& gt)
         mCameraCB.get(),
         mShadowCB.get(),
         0.1f,
-        1000.0f);
+        200.0f);
 
     FlushCommandQueue();
 }
@@ -1070,7 +1070,7 @@ void DirectXApp::UpdateCascades()
     }
 
     const float nearZ = 0.1f;
-    const float farZ = 1000.0f;
+    const float farZ = 200.0f;
     // Нелинейное распределение: lambda=1 чисто логарифмическое, 0 равномерное.
     const float lambda = 0.75f;
     const float clipRange = farZ - nearZ;
