@@ -2,6 +2,7 @@
 #include <DirectXMath.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_6.h>
@@ -380,6 +381,19 @@ void DirectXApp::Shutdown()
 {
     FlushCommandQueue();
 
+    mParticleSimCB.reset();
+    mParticleRenderCB.reset();
+    mParticleCounterReadback.Reset();
+    mParticleCounterResetUpload.Reset();
+    for (auto& buf : mParticleBuffers)
+    {
+        buf.Reset();
+    }
+    for (auto& counter : mParticleCounters)
+    {
+        counter.Reset();
+    }
+
     mShadowMap.Reset();
     mShadowDsvHeap.Reset();
     mShadowCB.reset();
@@ -750,6 +764,12 @@ bool DirectXApp::Initialize()
 
     CreateShadowResources();
 
+    mParticleSimCB = std::make_unique<UploadBuffer<ParticleSimConstants>>(device.Get(), 1, true);
+    mParticleRenderCB = std::make_unique<UploadBuffer<ParticleRenderConstants>>(device.Get(), 1, true);
+    InitializeParticleResources();
+    CreateParticleDescriptors();
+    ResetParticles();
+
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
         static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight), 1.0f, 200.0f);
     XMStoreFloat4x4(&mProj, P);
@@ -798,6 +818,15 @@ void DirectXApp::OnKeyDown(WPARAM wParam)
         mUVOffsetU = 0.0f;
         mUVOffsetV = 0.0f;
     }
+
+    if (wParam == 'P')
+    {
+        mParticlesEnabled = !mParticlesEnabled;
+        if (!mParticlesEnabled)
+        {
+            ResetParticles();
+        }
+    }
 }
 
 int DirectXApp::Run()
@@ -842,6 +871,9 @@ void DirectXApp::CalculateFrameStats()
         std::wstring windowText = mMainWndCaption;
         windowText += L" FPS: " + std::to_wstring(fps);
         windowText += L" MSPF: " + std::to_wstring(mspf);
+        windowText += L" | P: Particles ";
+        windowText += (mParticlesEnabled ? L"ON (" : L"OFF (");
+        windowText += std::to_wstring(mParticleAliveCount) + L")";
         SetWindowText(window.GetHandle(), windowText.c_str());
 
         mFrameCount = 0;
@@ -936,6 +968,8 @@ void DirectXApp::Update(const Timer& gt)
 
     // Нелинейные сплиты каскадов + матрицы света для CSM.
     UpdateCascades();
+
+    UpdateParticles(dt, gt.TotalTime());
 }
 
 void DirectXApp::Draw(const Timer& gt)
@@ -963,6 +997,21 @@ void DirectXApp::Draw(const Timer& gt)
         mScreenViewport,
         mScissorRect);
 
+    // Симуляция частиц в Compute шейдере (отдельный список, свой flush).
+    ExecuteParticleSimulation();
+
+    D3D12_GPU_DESCRIPTOR_HANDLE particleSrv = {};
+    D3D12_GPU_VIRTUAL_ADDRESS particleRenderCBAddr = 0;
+    UINT particleDrawCount = 0;
+    ID3D12DescriptorHeap* particleHeap = nullptr;
+    if (ShouldDrawParticles() && mParticleRenderCB)
+    {
+        particleSrv = GetParticleDrawSrv();
+        particleRenderCBAddr = mParticleRenderCB->Resource()->GetGPUVirtualAddress();
+        particleDrawCount = mParticleAliveCount;
+        particleHeap = mCbvHeap.Get();
+    }
+
     mRenderingSystem->LightingPass(
         CurrentBackBuffer(),
         CurrentBackBufferView(),
@@ -975,7 +1024,13 @@ void DirectXApp::Draw(const Timer& gt)
         mCameraCB.get(),
         mShadowCB.get(),
         0.1f,
-        200.0f);
+        200.0f,
+        mDepthStencilBuffer.Get(),
+        DepthStencilView(),
+        particleHeap,
+        particleSrv,
+        particleRenderCBAddr,
+        particleDrawCount);
 
     FlushCommandQueue();
 }
@@ -1335,6 +1390,396 @@ void DirectXApp::CreateTextureFromTGA(
         D3D12_RESOURCE_STATE_COPY_DEST,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     mCommandList->ResourceBarrier(1, &barrier);
+
+    ThrowIfFailed(mCommandList->Close());
+    ID3D12CommandList* cmdLists[] = { mCommandList.Get() };
+    mCommandQueue->ExecuteCommandLists(1, cmdLists);
+    FlushCommandQueue();
+}
+
+void DirectXApp::InitializeParticleResources()
+{
+    static_assert(sizeof(ParticleGpu) == 64, "ParticleGpu must be 64 bytes (HLSL layout).");
+
+    const UINT64 particleBufferBytes = static_cast<UINT64>(kMaxParticles) * sizeof(ParticleGpu);
+    constexpr UINT64 counterBytes = 4096;
+
+    D3D12_HEAP_PROPERTIES defaultHeap = {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        D3D12_RESOURCE_DESC particleDesc = {};
+        particleDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        particleDesc.Width = particleBufferBytes;
+        particleDesc.Height = 1;
+        particleDesc.DepthOrArraySize = 1;
+        particleDesc.MipLevels = 1;
+        particleDesc.Format = DXGI_FORMAT_UNKNOWN;
+        particleDesc.SampleDesc.Count = 1;
+        particleDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        particleDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &particleDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(&mParticleBuffers[i])));
+
+        D3D12_RESOURCE_DESC counterDesc = {};
+        counterDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        counterDesc.Width = counterBytes;
+        counterDesc.Height = 1;
+        counterDesc.DepthOrArraySize = 1;
+        counterDesc.MipLevels = 1;
+        counterDesc.Format = DXGI_FORMAT_UNKNOWN;
+        counterDesc.SampleDesc.Count = 1;
+        counterDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        counterDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &counterDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(&mParticleCounters[i])));
+    }
+
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC resetDesc = {};
+    resetDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resetDesc.Width = counterBytes;
+    resetDesc.Height = 1;
+    resetDesc.DepthOrArraySize = 1;
+    resetDesc.MipLevels = 1;
+    resetDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resetDesc.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &resetDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mParticleCounterResetUpload)));
+
+    void* mapped = nullptr;
+    D3D12_RANGE readRange = { 0, 0 };
+    ThrowIfFailed(mParticleCounterResetUpload->Map(0, &readRange, &mapped));
+    memset(mapped, 0, static_cast<size_t>(counterBytes));
+    D3D12_RANGE writeRange = { 0, sizeof(UINT) };
+    mParticleCounterResetUpload->Unmap(0, &writeRange);
+
+    D3D12_HEAP_PROPERTIES readbackHeap = {};
+    readbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+
+    ThrowIfFailed(device->CreateCommittedResource(
+        &readbackHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &resetDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&mParticleCounterReadback)));
+
+    mParticleSourceIndexA = true;
+    mParticleAliveCount = 0;
+    mParticleSpawnCount = 0;
+    mParticleSpawnAccumulator = 0.0f;
+    mParticleBufferStates = { D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON };
+    mParticleCounterStates = { D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON };
+}
+
+void DirectXApp::CreateParticleDescriptors()
+{
+    if (!mCbvHeap || !mParticleBuffers[0] || !mParticleBuffers[1] ||
+        !mParticleCounters[0] || !mParticleCounters[1])
+    {
+        return;
+    }
+
+    const UINT base = GetMaterialSrvOffset() + static_cast<UINT>(mMaterials.size());
+    if (base + 4 > 1024)
+    {
+        return;
+    }
+
+    mParticleSrvIndex = base;
+    mParticleUavStartIndex = base + 2;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = mCbvHeap->GetCPUDescriptorHandleForHeapStart();
+    cpuHandle.ptr += static_cast<SIZE_T>(mParticleSrvIndex) * mCbvSrvUavDescriptorSize;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = kMaxParticles;
+    srvDesc.Buffer.StructureByteStride = sizeof(ParticleGpu);
+    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        device->CreateShaderResourceView(mParticleBuffers[i].Get(), &srvDesc, cpuHandle);
+        cpuHandle.ptr += mCbvSrvUavDescriptorSize;
+    }
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+    uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uavDesc.Buffer.FirstElement = 0;
+    uavDesc.Buffer.NumElements = kMaxParticles;
+    uavDesc.Buffer.StructureByteStride = sizeof(ParticleGpu);
+    uavDesc.Buffer.CounterOffsetInBytes = 0;
+    uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+    for (UINT i = 0; i < 2; ++i)
+    {
+        device->CreateUnorderedAccessView(
+            mParticleBuffers[i].Get(),
+            mParticleCounters[i].Get(),
+            &uavDesc,
+            cpuHandle);
+        cpuHandle.ptr += mCbvSrvUavDescriptorSize;
+    }
+}
+
+void DirectXApp::ResetParticles()
+{
+    mParticleSourceIndexA = true;
+    mParticleAliveCount = 0;
+    mParticleSpawnCount = 0;
+    mParticleSpawnAccumulator = 0.0f;
+}
+
+void DirectXApp::UpdateParticleCounterFromReadback()
+{
+    if (!mParticleCounterReadback)
+    {
+        return;
+    }
+
+    void* mapped = nullptr;
+    D3D12_RANGE readRange = { 0, sizeof(UINT) };
+    if (SUCCEEDED(mParticleCounterReadback->Map(0, &readRange, &mapped)) && mapped)
+    {
+        const UINT count = *reinterpret_cast<const UINT*>(mapped);
+        mParticleAliveCount = (std::min)(count, static_cast<UINT>(kMaxParticles));
+        D3D12_RANGE writeRange = { 0, 0 };
+        mParticleCounterReadback->Unmap(0, &writeRange);
+    }
+}
+
+void DirectXApp::UpdateParticles(float dt, float totalTime)
+{
+    mParticleSpawnCount = 0;
+    if (!mParticleSimCB || !mParticleRenderCB || !mParticlesEnabled)
+    {
+        return;
+    }
+
+    UpdateParticleCounterFromReadback();
+
+    constexpr float kSpawnRate = 260.0f;
+    const float simDt = (std::min)(dt, 0.1f);
+    mParticleSpawnAccumulator += simDt * kSpawnRate;
+    mParticleSpawnCount = static_cast<UINT>(mParticleSpawnAccumulator);
+    mParticleSpawnAccumulator -= static_cast<float>(mParticleSpawnCount);
+
+    if (mParticleAliveCount >= kMaxParticles)
+    {
+        mParticleSpawnCount = 0;
+    }
+    else
+    {
+        const UINT freeCount = kMaxParticles - mParticleAliveCount;
+        mParticleSpawnCount = (std::min)(mParticleSpawnCount, freeCount);
+    }
+
+    ParticleSimConstants sim = {};
+    sim.Dt = simDt;
+    sim.TotalTime = totalTime;
+    sim.AliveCount = mParticleAliveCount;
+    sim.SpawnCount = mParticleSpawnCount;
+    sim.EmitterPos = XMFLOAT3(0.0f, 5.0f, 0.0f);
+    sim.BaseSize = 0.18f;
+    sim.EmitterVelocity = XMFLOAT3(0.0f, 0.0f, 0.0f);
+    sim.Gravity = 9.8f;
+    sim.LifeMin = 2.0f;
+    sim.LifeMax = 4.0f;
+    sim.SpeedMin = 2.0f;
+    sim.SpeedMax = 5.0f;
+    sim.MaxParticles = kMaxParticles;
+    sim.CollisionCenter = XMFLOAT3(0.0f, 0.0f, 0.0f);
+    sim.CollisionRadius = 0.0f;
+    sim.Restitution = 0.5f;
+    mParticleSimCB->CopyData(0, sim);
+
+    // Базис камеры для билбордов + ViewProj для геометрического шейдера.
+    const XMVECTOR forward = XMVector3Normalize(XMVectorSet(
+        cosf(mPitch) * cosf(mYaw),
+        sinf(mPitch),
+        cosf(mPitch) * sinf(mYaw),
+        0.0f));
+    const XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
+    XMVECTOR up = XMVector3Normalize(XMVector3Cross(forward, right));
+
+    ParticleRenderConstants render = {};
+    const XMMATRIX view = XMLoadFloat4x4(&mView);
+    const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+    XMStoreFloat4x4(&render.ViewProj, XMMatrixTranspose(view * proj));
+    XMStoreFloat3(&render.CameraRight, right);
+    XMStoreFloat3(&render.CameraUp, up);
+    render.RenderSizeScale = 1.0f;
+    render.AlphaDiscard = 0.5f;
+    mParticleRenderCB->CopyData(0, render);
+}
+
+void DirectXApp::TransitionParticleResource(
+    ID3D12GraphicsCommandList* cmdList,
+    ID3D12Resource* resource,
+    D3D12_RESOURCE_STATES& currentState,
+    D3D12_RESOURCE_STATES targetState)
+{
+    if (!cmdList || !resource || currentState == targetState)
+    {
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER barrier = MakeTransition(resource, currentState, targetState);
+    cmdList->ResourceBarrier(1, &barrier);
+    currentState = targetState;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DirectXApp::GetParticleDrawSrv() const
+{
+    const UINT sourceIndex = mParticleSourceIndexA ? 0u : 1u;
+    D3D12_GPU_DESCRIPTOR_HANDLE handle = mCbvHeap->GetGPUDescriptorHandleForHeapStart();
+    handle.ptr += static_cast<SIZE_T>(mParticleSrvIndex + sourceIndex) * mCbvSrvUavDescriptorSize;
+    return handle;
+}
+
+void DirectXApp::ExecuteParticleSimulation()
+{
+    if (!mParticleSimCB || !mParticleBuffers[0] || !mParticleBuffers[1] ||
+        !mParticleCounters[0] || !mParticleCounters[1] || !mParticleCounterReadback ||
+        !mParticleCounterResetUpload || !mRenderingSystem ||
+        !mRenderingSystem->GetParticleComputePSO() || !mRenderingSystem->GetParticleRootSignature())
+    {
+        return;
+    }
+
+    const UINT sourceIndex = mParticleSourceIndexA ? 0u : 1u;
+    const UINT destIndex = 1u - sourceIndex;
+
+    ThrowIfFailed(mDirectCmdListAlloc->Reset());
+    ThrowIfFailed(mCommandList->Reset(
+        mDirectCmdListAlloc.Get(),
+        mRenderingSystem->GetParticleComputePSO()));
+
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleCounters[destIndex].Get(),
+        mParticleCounterStates[destIndex],
+        D3D12_RESOURCE_STATE_COPY_DEST);
+    mCommandList->CopyBufferRegion(
+        mParticleCounters[destIndex].Get(),
+        0,
+        mParticleCounterResetUpload.Get(),
+        0,
+        sizeof(UINT));
+
+    const UINT workItemCount = (std::max)(mParticleAliveCount, mParticleSpawnCount);
+    if (workItemCount == 0u)
+    {
+        TransitionParticleResource(
+            mCommandList.Get(),
+            mParticleCounters[destIndex].Get(),
+            mParticleCounterStates[destIndex],
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+        mCommandList->CopyBufferRegion(
+            mParticleCounterReadback.Get(), 0,
+            mParticleCounters[destIndex].Get(), 0,
+            sizeof(UINT));
+        mParticleSourceIndexA = (destIndex == 0u);
+
+        ThrowIfFailed(mCommandList->Close());
+        ID3D12CommandList* cmdLists[] = { mCommandList.Get() };
+        mCommandQueue->ExecuteCommandLists(1, cmdLists);
+        FlushCommandQueue();
+        return;
+    }
+
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleBuffers[sourceIndex].Get(),
+        mParticleBufferStates[sourceIndex],
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleBuffers[destIndex].Get(),
+        mParticleBufferStates[destIndex],
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleCounters[sourceIndex].Get(),
+        mParticleCounterStates[sourceIndex],
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleCounters[destIndex].Get(),
+        mParticleCounterStates[destIndex],
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    mCommandList->SetComputeRootSignature(mRenderingSystem->GetParticleRootSignature());
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuBase = mCbvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = gpuBase;
+    srvHandle.ptr += static_cast<SIZE_T>(mParticleSrvIndex + sourceIndex) * mCbvSrvUavDescriptorSize;
+    D3D12_GPU_DESCRIPTOR_HANDLE consumeHandle = gpuBase;
+    consumeHandle.ptr += static_cast<SIZE_T>(mParticleUavStartIndex + sourceIndex) * mCbvSrvUavDescriptorSize;
+    D3D12_GPU_DESCRIPTOR_HANDLE appendHandle = gpuBase;
+    appendHandle.ptr += static_cast<SIZE_T>(mParticleUavStartIndex + destIndex) * mCbvSrvUavDescriptorSize;
+
+    ID3D12DescriptorHeap* heaps[] = { mCbvHeap.Get() };
+    mCommandList->SetDescriptorHeaps(1, heaps);
+    mCommandList->SetComputeRootDescriptorTable(0, srvHandle);
+    mCommandList->SetComputeRootDescriptorTable(1, consumeHandle);
+    mCommandList->SetComputeRootDescriptorTable(2, appendHandle);
+    mCommandList->SetComputeRootConstantBufferView(3, mParticleSimCB->Resource()->GetGPUVirtualAddress());
+
+    const UINT groupsX = (workItemCount + 255u) / 256u;
+    mCommandList->Dispatch(groupsX, 1, 1);
+
+    D3D12_RESOURCE_BARRIER uavBarrier = {};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.UAV.pResource = mParticleBuffers[destIndex].Get();
+    mCommandList->ResourceBarrier(1, &uavBarrier);
+
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleCounters[destIndex].Get(),
+        mParticleCounterStates[destIndex],
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+    mCommandList->CopyBufferRegion(
+        mParticleCounterReadback.Get(), 0,
+        mParticleCounters[destIndex].Get(), 0,
+        sizeof(UINT));
+
+    // Готовый буфер — в SRV, чтобы проход освещения/частиц рисовал без лишних барьеров.
+    TransitionParticleResource(
+        mCommandList.Get(),
+        mParticleBuffers[destIndex].Get(),
+        mParticleBufferStates[destIndex],
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    mParticleSourceIndexA = (destIndex == 0u);
 
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdLists[] = { mCommandList.Get() };

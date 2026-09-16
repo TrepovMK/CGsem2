@@ -59,18 +59,37 @@ public:
         UploadBuffer<CameraConstants>* cameraCB,
         UploadBuffer<ShadowConstants>* shadowCB,
         float nearZ,
-        float farZ);
+        float farZ,
+        ID3D12Resource* depthStencilBuffer = nullptr,
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {},
+        ID3D12DescriptorHeap* particleHeap = nullptr,
+        D3D12_GPU_DESCRIPTOR_HANDLE particleSrv = {},
+        D3D12_GPU_VIRTUAL_ADDRESS particleRenderCB = 0,
+        UINT particleCount = 0);
 
     GBuffer* GetGBuffer() const { return mGBuffer.get(); }
     ID3D12PipelineState* GetShadowPSO() const { return mShadowPSO.Get(); }
     ID3D12RootSignature* GetShadowRootSignature() const { return mShadowRootSignature.Get(); }
+    ID3D12RootSignature* GetParticleRootSignature() const { return mParticleRootSignature.Get(); }
+    ID3D12PipelineState* GetParticleComputePSO() const { return mParticleComputePSO.Get(); }
+    ID3D12PipelineState* GetParticlePSO() const { return mParticleGraphicsPSO.Get(); }
 
 private:
     bool CreateGBuffer(UINT width, UINT height);
     bool CreateLightingResources();
     bool CreateShadowResources();
-    bool CreateDebugResources();
-    void RenderDebugOverlays(const D3D12_VIEWPORT& fullViewport, float nearZ, float farZ);
+    bool CreateParticleResources();
+    void DrawParticles(
+        ID3D12Resource* backBuffer,
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle,
+        ID3D12Resource* depthStencilBuffer,
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle,
+        ID3D12DescriptorHeap* particleHeap,
+        D3D12_GPU_DESCRIPTOR_HANDLE particleSrv,
+        D3D12_GPU_VIRTUAL_ADDRESS particleRenderCB,
+        UINT particleCount,
+        const D3D12_VIEWPORT& viewport,
+        const D3D12_RECT& scissorRect);
 
     ID3D12Device* mDevice;
     ID3D12CommandQueue* mCommandQueue;
@@ -87,6 +106,7 @@ private:
     ComPtr<ID3D12RootSignature> mLightingRootSignature;
     ComPtr<ID3D12PipelineState> mShadowPSO;
     ComPtr<ID3D12RootSignature> mShadowRootSignature;
-    ComPtr<ID3D12PipelineState> mDebugPSO;
-    ComPtr<ID3D12RootSignature> mDebugRootSignature;
+    ComPtr<ID3D12RootSignature> mParticleRootSignature;
+    ComPtr<ID3D12PipelineState> mParticleComputePSO;
+    ComPtr<ID3D12PipelineState> mParticleGraphicsPSO;
 };
