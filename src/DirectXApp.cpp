@@ -969,6 +969,12 @@ void DirectXApp::Update(const Timer& gt)
     // Нелинейные сплиты каскадов + матрицы света для CSM.
     UpdateCascades();
 
+    // Константы пост-эффектов (размер цели, время, силы Chromatic/Vignette).
+    if (mRenderingSystem)
+    {
+        mRenderingSystem->UpdatePostConstants(gt.TotalTime());
+    }
+
     UpdateParticles(dt, gt.TotalTime());
 }
 

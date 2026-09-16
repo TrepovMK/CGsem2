@@ -127,6 +127,17 @@ bool GBuffer::CreateShadowSRV(ID3D12Device* device, ID3D12Resource* shadowMap, u
     return true;
 }
 
+DXGI_FORMAT GBuffer::GetFormat(GBUFFER_TEXTURE_TYPE type)
+{
+    switch (type)
+    {
+    case GBUFFER_ALBEDO: return mAlbedoFormat;
+    case GBUFFER_NORMAL: return mNormalFormat;
+    case GBUFFER_DEPTH:  return mDepthFormat;
+    default:             return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetRTV(GBUFFER_TEXTURE_TYPE type) const
 {
     D3D12_CPU_DESCRIPTOR_HANDLE handle = mRtvHeap->GetCPUDescriptorHandleForHeapStart();

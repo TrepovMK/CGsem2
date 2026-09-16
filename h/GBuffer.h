@@ -30,6 +30,8 @@ public:
     static constexpr UINT SRV_COUNT = GBUFFER_COUNT + 1;
     bool CreateShadowSRV(ID3D12Device* device, ID3D12Resource* shadowMap, unsigned int cascadeCount);
 
+    static DXGI_FORMAT GetFormat(GBUFFER_TEXTURE_TYPE type);
+
     void ClearRenderTargets(
         ID3D12GraphicsCommandList* cmdList,
         const float* clearColorAlbedo = nullptr,
