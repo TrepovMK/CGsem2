@@ -44,7 +44,7 @@ RenderingSystem::~RenderingSystem()
 
 bool RenderingSystem::Initialize(UINT width, UINT height)
 {
-    return CreateGBuffer(width, height) && CreateLightingResources() && CreateDebugResources();
+    return CreateGBuffer(width, height) && CreateLightingResources() && CreateShadowResources() && CreateDebugResources();
 }
 
 bool RenderingSystem::CreateGBuffer(UINT width, UINT height)
@@ -62,8 +62,8 @@ bool RenderingSystem::CreateLightingResources()
         return false;
     }
 
-    D3D12_DESCRIPTOR_RANGE gbufferRanges[3] = {};
-    for (UINT i = 0; i < 3; ++i)
+    D3D12_DESCRIPTOR_RANGE gbufferRanges[4] = {};
+    for (UINT i = 0; i < 4; ++i)
     {
         gbufferRanges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         gbufferRanges[i].NumDescriptors = 1;
@@ -71,9 +71,9 @@ bool RenderingSystem::CreateLightingResources()
         gbufferRanges[i].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
     }
 
-    D3D12_ROOT_PARAMETER rootParams[3] = {};
+    D3D12_ROOT_PARAMETER rootParams[4] = {};
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParams[0].DescriptorTable.NumDescriptorRanges = 3;
+    rootParams[0].DescriptorTable.NumDescriptorRanges = 4;
     rootParams[0].DescriptorTable.pDescriptorRanges = gbufferRanges;
     rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -85,20 +85,36 @@ bool RenderingSystem::CreateLightingResources()
     rootParams[2].Descriptor.ShaderRegister = 1;
     rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[3].Descriptor.ShaderRegister = 2;
+    rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samplers[2] = {};
+    samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].ShaderRegister = 0;
+    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+
+    // Comparison-сэмплер для PCF через SampleCmp (как в референсе).
+    samplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    samplers[1].MinLOD = 0.0f;
+    samplers[1].MaxLOD = D3D12_FLOAT32_MAX;
+    samplers[1].ShaderRegister = 1;
+    samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-    rootSigDesc.NumParameters = 3;
+    rootSigDesc.NumParameters = 4;
     rootSigDesc.pParameters = rootParams;
-    rootSigDesc.NumStaticSamplers = 1;
-    rootSigDesc.pStaticSamplers = &sampler;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers = samplers;
     rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serializedRootSig;
@@ -155,6 +171,74 @@ bool RenderingSystem::CreateLightingResources()
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mLightingPSO)));
 
     mLightingCB = std::make_unique<UploadBuffer<LightConstants>>(mDevice, 16, true);
+    return true;
+}
+
+bool RenderingSystem::CreateShadowResources()
+{
+    // Root signature теневого прохода: один CBV b0 (ObjectConstants).
+    D3D12_ROOT_PARAMETER rootParam = {};
+    rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParam.Descriptor.ShaderRegister = 0;
+    rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters = 1;
+    rootSigDesc.pParameters = &rootParam;
+    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> serializedRootSig;
+    ComPtr<ID3DBlob> errorBlob;
+    ThrowIfFailed(D3D12SerializeRootSignature(
+        &rootSigDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        serializedRootSig.GetAddressOf(),
+        errorBlob.GetAddressOf()));
+
+    ThrowIfFailed(mDevice->CreateRootSignature(
+        0,
+        serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(&mShadowRootSignature)));
+
+    auto vsShadow = d3dUtil::CompileShader(L"../src/shaders.hlsl", nullptr, "VS_Shadow", "vs_5_0");
+    if (!vsShadow)
+    {
+        return false;
+    }
+
+    D3D12_INPUT_ELEMENT_DESC shadowInputLayout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.VS = { vsShadow->GetBufferPointer(), vsShadow->GetBufferSize() };
+    psoDesc.pRootSignature = mShadowRootSignature.Get();
+    psoDesc.InputLayout = { shadowInputLayout, sizeof(shadowInputLayout) / sizeof(shadowInputLayout[0]) };
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 0;
+    psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count = 1;
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
+    psoDesc.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    psoDesc.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    psoDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    psoDesc.RasterizerState.DepthClipEnable = TRUE;
+    psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
+    psoDesc.BlendState.IndependentBlendEnable = FALSE;
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.DepthStencilState.DepthEnable = TRUE;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    psoDesc.DepthStencilState.StencilEnable = FALSE;
+
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mShadowPSO)));
     return true;
 }
 
@@ -272,6 +356,7 @@ void RenderingSystem::LightingPass(
     int& currBackBufferIndex,
     IDXGISwapChain* swapChain,
     UploadBuffer<CameraConstants>* cameraCB,
+    UploadBuffer<ShadowConstants>* shadowCB,
     float nearZ,
     float farZ)
 {
@@ -296,6 +381,10 @@ void RenderingSystem::LightingPass(
     mCommandList->SetDescriptorHeaps(1, heaps);
     mCommandList->SetGraphicsRootDescriptorTable(0, mGBuffer->GetSrvHeap()->GetGPUDescriptorHandleForHeapStart());
     mCommandList->SetGraphicsRootConstantBufferView(2, cameraCB->Resource()->GetGPUVirtualAddress());
+    if (shadowCB)
+    {
+        mCommandList->SetGraphicsRootConstantBufferView(3, shadowCB->Resource()->GetGPUVirtualAddress());
+    }
 
     mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -342,6 +431,8 @@ void RenderingSystem::Shutdown()
     mLightingCB.reset();
     mLightingPSO.Reset();
     mLightingRootSignature.Reset();
+    mShadowPSO.Reset();
+    mShadowRootSignature.Reset();
     mDebugPSO.Reset();
     mDebugRootSignature.Reset();
 }

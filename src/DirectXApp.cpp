@@ -1,6 +1,7 @@
 #include "../h/DirectXApp.h"
 #include <DirectXMath.h>
 #include <algorithm>
+#include <cmath>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_6.h>
@@ -166,7 +167,9 @@ void DirectXApp::BuildShaders()
 void DirectXApp::BuildConstantBuffer()
 {
     const UINT objectCount = std::max<UINT>(1u, static_cast<UINT>(mSubmeshes.size()));
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device.Get(), objectCount, true);
+    // Места под геометрию + по набору на каждый каскад теней (как в референсе).
+    const UINT totalObjects = objectCount * (kNumCascades + 1u);
+    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device.Get(), totalObjects, true);
 
     const UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
     D3D12_CPU_DESCRIPTOR_HANDLE cbvHandle = mCbvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -376,6 +379,10 @@ void DirectXApp::BuildObj(const std::string& path)
 void DirectXApp::Shutdown()
 {
     FlushCommandQueue();
+
+    mShadowMap.Reset();
+    mShadowDsvHeap.Reset();
+    mShadowCB.reset();
 
     if (mRenderingSystem)
     {
@@ -741,6 +748,8 @@ bool DirectXApp::Initialize()
         return false;
     }
 
+    CreateShadowResources();
+
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * XM_PI,
         static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight), 1.0f, 1000.0f);
     XMStoreFloat4x4(&mProj, P);
@@ -924,6 +933,9 @@ void DirectXApp::Update(const Timer& gt)
             1.8f);
         mObjectCB->CopyData(i, objConstants);
     }
+
+    // Нелинейные сплиты каскадов + матрицы света для CSM.
+    UpdateCascades();
 }
 
 void DirectXApp::Draw(const Timer& gt)
@@ -932,6 +944,9 @@ void DirectXApp::Draw(const Timer& gt)
     {
         return;
     }
+
+    // Проход глубины по каскадам (CSM) перед геометрией.
+    RenderShadowMaps();
 
     mRenderingSystem->GeometryPass(
         mPSO.Get(),
@@ -958,9 +973,266 @@ void DirectXApp::Draw(const Timer& gt)
         mCurrBackBuffer,
         mSwapChain.Get(),
         mCameraCB.get(),
+        mShadowCB.get(),
         0.1f,
         1000.0f);
 
+    FlushCommandQueue();
+}
+
+bool DirectXApp::GetDirectionalLightDir(DirectX::XMFLOAT3& outDir) const
+{
+    for (const auto& light : mLights)
+    {
+        if (light.Type == LIGHT_DIRECTIONAL)
+        {
+            outDir = light.Direction;
+            return true;
+        }
+    }
+    return false;
+}
+
+void DirectXApp::CreateShadowResources()
+{
+    mShadowMap.Reset();
+    mShadowDsvHeap.Reset();
+    mShadowCB.reset();
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = kShadowMapSize;
+    texDesc.Height = kShadowMapSize;
+    texDesc.DepthOrArraySize = static_cast<UINT16>(kNumCascades);
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clear = {};
+    clear.Format = DXGI_FORMAT_D32_FLOAT;
+    clear.DepthStencil.Depth = 1.0f;
+    clear.DepthStencil.Stencil = 0;
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    ThrowIfFailed(device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        &clear,
+        IID_PPV_ARGS(&mShadowMap)));
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.NumDescriptors = kNumCascades;
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    ThrowIfFailed(device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&mShadowDsvHeap)));
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+    dsvDesc.Texture2DArray.MipSlice = 0;
+    dsvDesc.Texture2DArray.ArraySize = 1;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (unsigned int i = 0; i < kNumCascades; ++i)
+    {
+        dsvDesc.Texture2DArray.FirstArraySlice = i;
+        device->CreateDepthStencilView(mShadowMap.Get(), &dsvDesc, dsvHandle);
+        dsvHandle.ptr += mDsvDescriptorSize;
+    }
+
+    mShadowViewport.TopLeftX = 0.0f;
+    mShadowViewport.TopLeftY = 0.0f;
+    mShadowViewport.Width = static_cast<float>(kShadowMapSize);
+    mShadowViewport.Height = static_cast<float>(kShadowMapSize);
+    mShadowViewport.MinDepth = 0.0f;
+    mShadowViewport.MaxDepth = 1.0f;
+    mShadowScissor = { 0, 0, static_cast<LONG>(kShadowMapSize), static_cast<LONG>(kShadowMapSize) };
+    mShadowMapStateIsSrv = false;
+
+    mShadowCB = std::make_unique<UploadBuffer<ShadowConstants>>(device.Get(), 1, true);
+
+    if (mRenderingSystem && mRenderingSystem->GetGBuffer())
+    {
+        mRenderingSystem->GetGBuffer()->CreateShadowSRV(device.Get(), mShadowMap.Get(), kNumCascades);
+    }
+}
+
+void DirectXApp::UpdateCascades()
+{
+    if (!mShadowCB)
+    {
+        return;
+    }
+
+    const float nearZ = 0.1f;
+    const float farZ = 1000.0f;
+    // Нелинейное распределение: lambda=1 чисто логарифмическое, 0 равномерное.
+    const float lambda = 0.75f;
+    const float clipRange = farZ - nearZ;
+
+    float splits[kNumCascades] = {};
+    for (unsigned int i = 0; i < kNumCascades; ++i)
+    {
+        const float p = static_cast<float>(i + 1) / static_cast<float>(kNumCascades);
+        const float logSplit = nearZ * std::pow(farZ / nearZ, p);
+        const float uniformSplit = nearZ + clipRange * p;
+        splits[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+    }
+
+    ShadowConstants shadow = {};
+    shadow.CascadeSplits = XMFLOAT4(splits[0], splits[1], splits[2], 0.0f);
+
+    XMFLOAT3 dirStorage = XMFLOAT3(0.5f, -1.0f, 0.25f);
+    GetDirectionalLightDir(dirStorage);
+
+    const XMMATRIX view = XMLoadFloat4x4(&mView);
+    const float aspect = static_cast<float>(mClientWidth) / static_cast<float>((std::max)(1, mClientHeight));
+
+    for (unsigned int i = 0; i < kNumCascades; ++i)
+    {
+        const float splitNear = (i == 0) ? nearZ : splits[i - 1];
+        const float splitFar = splits[i];
+
+        const XMMATRIX subProj = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspect, splitNear, splitFar);
+
+        // Углы усечённого фрустума каскада в мировых координатах.
+        XMVECTOR frustumCorners[8] =
+        {
+            XMVectorSet(-1.0f, 1.0f, 0.0f, 1.0f),
+            XMVectorSet(1.0f, 1.0f, 0.0f, 1.0f),
+            XMVectorSet(-1.0f, -1.0f, 0.0f, 1.0f),
+            XMVectorSet(1.0f, -1.0f, 0.0f, 1.0f),
+            XMVectorSet(-1.0f, 1.0f, 1.0f, 1.0f),
+            XMVectorSet(1.0f, 1.0f, 1.0f, 1.0f),
+            XMVectorSet(-1.0f, -1.0f, 1.0f, 1.0f),
+            XMVectorSet(1.0f, -1.0f, 1.0f, 1.0f),
+        };
+
+        const XMMATRIX invSub = XMMatrixInverse(nullptr, view * subProj);
+        for (auto& corner : frustumCorners)
+        {
+            corner = XMVector4Transform(corner, invSub);
+            corner = XMVectorDivide(corner, XMVectorSplatW(corner));
+        }
+
+        XMVECTOR center = XMVectorZero();
+        for (int c = 0; c < 8; ++c)
+        {
+            center = XMVectorAdd(center, frustumCorners[c]);
+        }
+        center = XMVectorScale(center, 1.0f / 8.0f);
+
+        float radius = 0.0f;
+        for (int c = 0; c < 8; ++c)
+        {
+            const float dist = XMVectorGetX(XMVector3Length(XMVectorSubtract(frustumCorners[c], center)));
+            radius = (std::max)(radius, dist);
+        }
+        radius = std::ceil(radius * 16.0f) / 16.0f;
+
+        const XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&dirStorage));
+        const XMVECTOR lightPos = XMVectorSubtract(center, XMVectorScale(lightDir, radius * 2.0f));
+        XMMATRIX lightView = XMMatrixLookAtLH(lightPos, center, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+
+        // Снаппинг к текселям для стабильности теней.
+        const float texelWorldSize = (2.0f * radius) / static_cast<float>(kShadowMapSize);
+        const XMVECTOR centerLS = XMVector3TransformCoord(center, lightView);
+        const float offsetX = std::floor(XMVectorGetX(centerLS) / texelWorldSize) * texelWorldSize - XMVectorGetX(centerLS);
+        const float offsetY = std::floor(XMVectorGetY(centerLS) / texelWorldSize) * texelWorldSize - XMVectorGetY(centerLS);
+        lightView = lightView * XMMatrixTranslation(offsetX, offsetY, 0.0f);
+
+        const XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(-radius, radius, -radius, radius, -radius * 4.0f, radius * 4.0f);
+
+        XMStoreFloat4x4(&shadow.LightViewProj[i], XMMatrixTranspose(lightView * lightProj));
+        mCascadeViewProj[i] = shadow.LightViewProj[i];
+    }
+
+    shadow.LightDirection = XMFLOAT4(dirStorage.x, dirStorage.y, dirStorage.z, 0.0f);
+    mShadowCB->CopyData(0, shadow);
+}
+
+void DirectXApp::RenderShadowMaps()
+{
+    if (!mShadowMap || !mShadowDsvHeap || !mShadowCB || !mRenderingSystem)
+    {
+        return;
+    }
+    if (mSubmeshes.empty() || mIndexCount == 0)
+    {
+        return;
+    }
+
+    XMFLOAT3 dirStorage = XMFLOAT3(0.5f, -1.0f, 0.25f);
+    GetDirectionalLightDir(dirStorage);
+    (void)dirStorage;
+
+    ThrowIfFailed(mDirectCmdListAlloc->Reset());
+    ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
+
+    if (mShadowMapStateIsSrv)
+    {
+        D3D12_RESOURCE_BARRIER barrier = MakeTransition(
+            mShadowMap.Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        mCommandList->ResourceBarrier(1, &barrier);
+        mShadowMapStateIsSrv = false;
+    }
+
+    mCommandList->RSSetViewports(1, &mShadowViewport);
+    mCommandList->RSSetScissorRects(1, &mShadowScissor);
+    mCommandList->SetPipelineState(mRenderingSystem->GetShadowPSO());
+    mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetShadowRootSignature());
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    mCommandList->IASetVertexBuffers(0, 1, &mVertexBufferView);
+    mCommandList->IASetIndexBuffer(&mIndexBufferView);
+
+    const UINT objectCount = std::max<UINT>(1u, static_cast<UINT>(mSubmeshes.size()));
+    const UINT elementSize = mObjectCB->GetElementSize();
+    const D3D12_GPU_VIRTUAL_ADDRESS baseAddr = mObjectCB->Resource()->GetGPUVirtualAddress();
+    const XMMATRIX world = XMMatrixIdentity();
+
+    for (unsigned int cascade = 0; cascade < kNumCascades; ++cascade)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = mShadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        dsvHandle.ptr += cascade * mDsvDescriptorSize;
+
+        mCommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        mCommandList->OMSetRenderTargets(0, nullptr, FALSE, &dsvHandle);
+
+        const XMMATRIX cascadeViewProj = XMMatrixTranspose(XMLoadFloat4x4(&mCascadeViewProj[cascade]));
+        const UINT shadowBase = objectCount * (cascade + 1u);
+
+        for (UINT i = 0; i < mSubmeshes.size(); ++i)
+        {
+            ObjectConstants obj;
+            XMStoreFloat4x4(&obj.mWorld, XMMatrixTranspose(world));
+            XMStoreFloat4x4(&obj.mWorldViewProj, XMMatrixTranspose(world * cascadeViewProj));
+            obj.mUVTransform = XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+            obj.mCurtainParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+            const UINT shadowIndex = shadowBase + i;
+            mObjectCB->CopyData(shadowIndex, obj);
+
+            mCommandList->SetGraphicsRootConstantBufferView(0, baseAddr + static_cast<UINT64>(shadowIndex) * elementSize);
+            mCommandList->DrawIndexedInstanced(mSubmeshes[i].IndexCount, 1, mSubmeshes[i].IndexStart, 0, 0);
+        }
+    }
+
+    D3D12_RESOURCE_BARRIER toSrv = MakeTransition(
+        mShadowMap.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mCommandList->ResourceBarrier(1, &toSrv);
+    mShadowMapStateIsSrv = true;
+
+    ThrowIfFailed(mCommandList->Close());
+    ID3D12CommandList* cmdLists[] = { mCommandList.Get() };
+    mCommandQueue->ExecuteCommandLists(1, cmdLists);
     FlushCommandQueue();
 }
 

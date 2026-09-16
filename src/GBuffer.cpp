@@ -81,7 +81,7 @@ bool GBuffer::CreateRTVs(ID3D12Device* device)
 bool GBuffer::CreateSRVs(ID3D12Device* device)
 {
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-    heapDesc.NumDescriptors = GBUFFER_COUNT;
+    heapDesc.NumDescriptors = SRV_COUNT;
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
@@ -100,6 +100,30 @@ bool GBuffer::CreateSRVs(ID3D12Device* device)
         handle.ptr += mCbvSrvDescriptorSize;
     }
 
+    return true;
+}
+
+bool GBuffer::CreateShadowSRV(ID3D12Device* device, ID3D12Resource* shadowMap, unsigned int cascadeCount)
+{
+    if (!mSrvHeap || !shadowMap || cascadeCount == 0)
+    {
+        return false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = mSrvHeap->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += SHADOW_SRV_INDEX * mCbvSrvDescriptorSize;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    srvDesc.Texture2DArray.MostDetailedMip = 0;
+    srvDesc.Texture2DArray.MipLevels = 1;
+    srvDesc.Texture2DArray.FirstArraySlice = 0;
+    srvDesc.Texture2DArray.ArraySize = cascadeCount;
+    srvDesc.Texture2DArray.PlaneSlice = 0;
+    srvDesc.Texture2DArray.ResourceMinLODClamp = 0.0f;
+    device->CreateShaderResourceView(shadowMap, &srvDesc, handle);
     return true;
 }
 

@@ -62,3 +62,23 @@ PSOutput PS(VSOutput pin)
     pout.Depth = pin.PosH.z;
     return pout;
 }
+
+// Проход глубины для каскадных теневых карт: только позиция в light space.
+struct ShadowVSInput
+{
+    float3 Pos : POSITION;
+    float3 Normal : NORMAL;
+    float2 Tex : TEXCOORD;
+};
+
+struct ShadowVSOut
+{
+    float4 PosH : SV_POSITION;
+};
+
+ShadowVSOut VS_Shadow(ShadowVSInput vin)
+{
+    ShadowVSOut vout;
+    vout.PosH = mul(float4(vin.Pos, 1.0f), mWorldViewProj);
+    return vout;
+}

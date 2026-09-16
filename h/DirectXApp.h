@@ -71,6 +71,12 @@ private:
     bool IsCurtainMaterialName(const std::string& materialName) const;
     UINT GetMaterialSrvOffset() const;
 
+    // Каскадные тени (CSM): pecypcы, нелинейные сплиты, рендер глубины.
+    void CreateShadowResources();
+    void UpdateCascades();
+    void RenderShadowMaps();
+    bool GetDirectionalLightDir(DirectX::XMFLOAT3& outDir) const;
+
     DirectXApp* dxApp = nullptr;
     XMFLOAT3 mEyePos = XMFLOAT3(0.0f, 0.0f, 0.0f);
     Window& window;
@@ -128,6 +134,15 @@ private:
     ComPtr<ID3D12PipelineState> mPSO;
     ComPtr<ID3D12PipelineState> mWireframePSO;
     bool mWireframeMode = false;
+
+    // Ресурсы каскадных теней.
+    ComPtr<ID3D12Resource> mShadowMap;
+    ComPtr<ID3D12DescriptorHeap> mShadowDsvHeap;
+    std::unique_ptr<UploadBuffer<ShadowConstants>> mShadowCB;
+    XMFLOAT4X4 mCascadeViewProj[kNumCascades] = {};
+    D3D12_VIEWPORT mShadowViewport = {};
+    D3D12_RECT mShadowScissor = {};
+    bool mShadowMapStateIsSrv = false;
 
     POINT mLastMousePos;
     XMFLOAT4X4 mWorld = MathHelper::Identity4x4();

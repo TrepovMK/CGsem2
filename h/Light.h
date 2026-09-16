@@ -113,3 +113,15 @@ struct LightConstants
         CameraPos = cameraPos;
     }
 };
+
+// Каскадные теневые карты (как в KG_Sem4_Laba5).
+static constexpr unsigned int kNumCascades = 3;
+static constexpr unsigned int kShadowMapSize = 1024;
+
+struct ShadowConstants
+{
+    XMFLOAT4X4 LightViewProj[kNumCascades];
+    // Дистанции сплитов каскадов во view-space (x, y, z; w не используется).
+    XMFLOAT4 CascadeSplits = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+    XMFLOAT4 LightDirection = XMFLOAT4(0.0f, -1.0f, 0.0f, 0.0f);
+};

@@ -25,6 +25,11 @@ public:
     ID3D12DescriptorHeap* GetSrvHeap() const { return mSrvHeap.Get(); }
     UINT GetSrvDescriptorSize() const { return mCbvSrvDescriptorSize; }
 
+    // Слот 3 в SRV-куче зарезервирован под Texture2DArray каскадных теней.
+    static constexpr UINT SHADOW_SRV_INDEX = 3;
+    static constexpr UINT SRV_COUNT = GBUFFER_COUNT + 1;
+    bool CreateShadowSRV(ID3D12Device* device, ID3D12Resource* shadowMap, unsigned int cascadeCount);
+
     void ClearRenderTargets(
         ID3D12GraphicsCommandList* cmdList,
         const float* clearColorAlbedo = nullptr,
