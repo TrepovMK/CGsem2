@@ -40,7 +40,7 @@ struct PixelIn
     float TessFactor : TEXCOORD1;
 };
 
-PixelIn VS_Geometry(VSInput vin)
+PixelIn VS_Geometry(VSInput vin) // вершинный шейдер
 {
     PixelIn vout;
 
@@ -93,18 +93,15 @@ struct HSConstants
     float InsideTess : SV_InsideTessFactor;
 };
 
-HSConstants HS_Constants(InputPatch<ControlPoint, 3> patch, uint patchId : SV_PrimitiveID)
+HSConstants HS_Constants(InputPatch<ControlPoint, 3> patch, uint patchId : SV_PrimitiveID) // лаба 3
 {
     HSConstants hsc;
 
-    float3 center = (patch[0].PosW + patch[1].PosW + patch[2].PosW) / 3.0f;
-    float distanceToCamera = length(center - gEyePosW);
+    float3 center = (patch[0].PosW + patch[1].PosW + patch[2].PosW) / 3.0f; // координаты треугольника в мире
+    float distanceToCamera = length(center - gEyePosW); // как далеко от камеры?
 
-    float tessFactor = max(1.0, min(8.0, lerp(8.0, 1.0, saturate((distanceToCamera - 0.2) / 1.0))));
-    if (gObjectPadding.z > 0.0f)
-    {
-        tessFactor = max(tessFactor, gObjectPadding.z);
-    }
+    float tessFactor = max(1.0, min(8.0, lerp(8.0, 1.0, saturate((distanceToCamera - 0.2) / 1.0)))); // увеличиваем тесс фактор чем ближе к камере
+
 
     hsc.EdgeTess[0] = tessFactor;
     hsc.EdgeTess[1] = tessFactor;
@@ -125,7 +122,7 @@ ControlPoint HS_Main(InputPatch<ControlPoint, 3> patch, uint cpId : SV_OutputCon
 }
 
 [domain("tri")]
-PixelIn DS_Main(HSConstants hsc, float3 bary : SV_DomainLocation, const OutputPatch<ControlPoint, 3> patch)
+PixelIn DS_Main(HSConstants hsc, float3 bary : SV_DomainLocation, const OutputPatch<ControlPoint, 3> patch) // твою мыш
 {
     PixelIn outV;
 
@@ -136,10 +133,10 @@ PixelIn DS_Main(HSConstants hsc, float3 bary : SV_DomainLocation, const OutputPa
     float2 texC = bary.x * patch[0].TexC + bary.y * patch[1].TexC + bary.z * patch[2].TexC;
 
     float height = gDisplacementMap.SampleLevel(gLinearWrap, texC, 0.0f).r;
-    float displacement = (height - 0.5f) * 2.0f;
-    float dispStrength = (gObjectPadding.y > 0.0f) ? gObjectPadding.y : 0.2f;
+    float displacement = (height - 0.5f) * 2.0f; // переводим из 0 - 1 в -1 - +1
+    float dispStrength = (gObjectPadding.y > 0.0f) ? gObjectPadding.y : 0.2f; // сила эффекта
 
-    posW += normalW * (displacement * dispStrength);
+    posW += normalW * (displacement * dispStrength); //движение точки вдоль нормали
 
     outV.PosW = posW;
     outV.NormalW = normalW;
@@ -159,7 +156,7 @@ struct GBufferOut
     float Depth : SV_Target2;
 };
 
-GBufferOut PS_Geometry(PixelIn pin)
+GBufferOut PS_Geometry(PixelIn pin) // пиксель шейдер
 {
     GBufferOut pout;
 
@@ -171,7 +168,7 @@ GBufferOut PS_Geometry(PixelIn pin)
     float3 N = normalize(pin.NormalW);
 
     float3x3 TBN = float3x3(T, B, N);
-    float3 normalW = normalize(mul(normalTS, TBN));
+    float3 normalW = normalize(mul(normalTS, TBN)); //смешивание тбн с картой нормали.
 
     if (gObjectPadding.x >= 1.5f && gObjectPadding.x < 2.5f)
     {
