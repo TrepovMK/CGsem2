@@ -1,7 +1,7 @@
-Texture2D gSceneTex : register(t0);
-Texture2D gAlbedoTex : register(t1);
-Texture2D gNormalTex : register(t2);
-Texture2D gDepthTex : register(t3);
+Texture2D gSceneTex  : register(t0);  // готовый кадр после lighting
+Texture2D gAlbedoTex : register(t1);  //
+Texture2D gNormalTex : register(t2);  //
+Texture2D gDepthTex  : register(t3);  // g buffer
 SamplerState gLinearClamp : register(s0);
 
 cbuffer PostConstants : register(b0)
@@ -40,14 +40,14 @@ VSOut VS_FullscreenQuad(uint vertexId : SV_VertexID)
     };
 
     VSOut output;
-    output.PosH = float4(pos[vertexId], 0.0f, 1.0f);
-    output.TexC = uv[vertexId];
+    output.PosH = float4(pos[vertexId], 0.0f, 1.0f); // куда: угол экрана
+    output.TexC = uv[vertexId];  // что читать: место на картинке
     return output;
 }
 
 // Заготовка: пиксельный шейдер принимает текстуры G-Buffer
 // (gAlbedoTex/gNormalTex/gDepthTex) и сцену после lighting-прохода.
-// Сейчас G-Buffer доступен для будущих эффектов (DoF/SSAO/контуры),
+//
 // а используются две техники: Chromatic Aberration + Vignette.
 float3 ApplyChromaticAberration(float2 uv)
 {
