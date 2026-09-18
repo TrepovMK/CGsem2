@@ -693,7 +693,7 @@ void DirectXApp::BuildOctree()
         return;
     }
 
-    BoundingBox sceneBounds = mSceneObjects[0].worldBounds;
+    BoundingBox sceneBounds = mSceneObjects[0].worldBounds; // ищет размеры для одного большого бокса для всей сцены
     for (unsigned int i = 1; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
         BoundingBox::CreateMerged(sceneBounds, sceneBounds, mSceneObjects[i].worldBounds);
     }
@@ -705,15 +705,15 @@ void DirectXApp::BuildOctree()
     extents.z = (std::max)(extents.z, 1.0f);
     extents.x *= 1.001f;
     extents.y *= 1.001f;
-    extents.z *= 1.001f;
+    extents.z *= 1.001f; //слегка его увеличивает
 
-    OctreeNode rootNode;
+    OctreeNode rootNode; // создает
     rootNode.center = center;
     rootNode.extents = extents;
     rootNode.bounds = BoundingBox(center, extents);
     mOctreeNodes.push_back(std::move(rootNode));
 
-    for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
+    for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) { //запускает запихивание объектов туда
         InsertObjectIntoOctree(i, 0, 0);
     }
 }
@@ -727,24 +727,24 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
 
     const SceneObject& object = mSceneObjects[objectIndex];
 
-    if (static_cast<int>(mOctreeNodes[nodeIndex].objectIndices.size()) >= kMaxLeafObjects &&
+    if (static_cast<int>(mOctreeNodes[nodeIndex].objectIndices.size()) >= kMaxLeafObjects && // проверяем, больше ли 28 объектов и уровень глубины
         depth < kMaxOctreeDepth) {
         if (mOctreeNodes[nodeIndex].children[0] == -1) {
             XMFLOAT3 parentCenter = mOctreeNodes[nodeIndex].center;
-            XMFLOAT3 childExtents(mOctreeNodes[nodeIndex].extents.x * 0.5f, mOctreeNodes[nodeIndex].extents.y * 0.5f, mOctreeNodes[nodeIndex].extents.z * 0.5f);
+            XMFLOAT3 childExtents(mOctreeNodes[nodeIndex].extents.x * 0.5f, mOctreeNodes[nodeIndex].extents.y * 0.5f, mOctreeNodes[nodeIndex].extents.z * 0.5f); //считаем размер некст кубика который в два раза меньше прошлого
             for (int i = 0; i < 8; ++i) {
-                OctreeNode child;
+                OctreeNode child; //создаем восемь детев
                 child.extents = childExtents;
                 child.center = XMFLOAT3(
                     parentCenter.x + ((i & 1) ? childExtents.x : -childExtents.x),
                     parentCenter.y + ((i & 2) ? childExtents.y : -childExtents.y),
-                    parentCenter.z + ((i & 4) ? childExtents.z : -childExtents.z));
+                    parentCenter.z + ((i & 4) ? childExtents.z : -childExtents.z)); //положение дитя внутри родительского кубика
                 child.bounds = BoundingBox(child.center, child.extents);
                 mOctreeNodes[nodeIndex].children[i] = static_cast<int>(mOctreeNodes.size());
-                mOctreeNodes.push_back(std::move(child));
+                mOctreeNodes.push_back(std::move(child)); // кладем дете в куб и запоминаем его индекс
             }
 
-            auto storedObjects = mOctreeNodes[nodeIndex].objectIndices;
+            auto storedObjects = mOctreeNodes[nodeIndex].objectIndices; // теперь мы достаем объекты из биг куба и будем распихивать по детям
             mOctreeNodes[nodeIndex].objectIndices.clear();
             for (unsigned int idx : storedObjects) {
                 InsertObjectIntoOctree(idx, nodeIndex, depth);
@@ -756,7 +756,7 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
     XMFLOAT3 nodeExtents = mOctreeNodes[nodeIndex].extents;
     const XMFLOAT3 childExtents(nodeExtents.x * 0.5f, nodeExtents.y * 0.5f, nodeExtents.z * 0.5f);
     unsigned int targetChild = 0;
-    targetChild |= (object.worldBounds.Center.x >= nodeCenter.x) ? 1u : 0u;
+    targetChild |= (object.worldBounds.Center.x >= nodeCenter.x) ? 1u : 0u; //тож самое что и при нарезке детей -
     targetChild |= (object.worldBounds.Center.y >= nodeCenter.y) ? 2u : 0u;
     targetChild |= (object.worldBounds.Center.z >= nodeCenter.z) ? 4u : 0u;
 
@@ -764,9 +764,9 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
         nodeCenter.x + ((targetChild & 1) ? childExtents.x : -childExtents.x),
         nodeCenter.y + ((targetChild & 2) ? childExtents.y : -childExtents.y),
         nodeCenter.z + ((targetChild & 4) ? childExtents.z : -childExtents.z));
-    BoundingBox childBounds(nextCenter, childExtents);
+    BoundingBox childBounds(nextCenter, childExtents); //дальш смотрим какой центр у этого дете и задаем ему баундинг бокс
 
-    if (childBounds.Contains(object.worldBounds) == CONTAINS) {
+    if (childBounds.Contains(object.worldBounds) == CONTAINS) { // если объект влезает в ребенка... тогда инсерт в ребенка
         if (mOctreeNodes[nodeIndex].children[targetChild] == -1) {
             OctreeNode child;
             child.extents = childExtents;
@@ -777,11 +777,11 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
         }
         InsertObjectIntoOctree(objectIndex, mOctreeNodes[nodeIndex].children[targetChild], depth + 1);
     } else {
-        mOctreeNodes[nodeIndex].objectIndices.push_back(objectIndex);
+        mOctreeNodes[nodeIndex].objectIndices.push_back(objectIndex); // иначе пока не трогаем
     }
 }
 
-void DirectXApp::CollectVisibleObjects()
+void DirectXApp::CollectVisibleObjects() //лаба 4
 {
     mVisibleObjects.clear();
     mObjectsTestedThisFrame = 0;
@@ -826,7 +826,7 @@ void DirectXApp::CollectVisibleObjects()
     mVisibleObjects.reserve(mSceneObjects.size());
     for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
         ++mObjectsTestedThisFrame;
-        if (worldFrustum.Contains(mSceneObjects[i].worldBounds) != DISJOINT) {
+        if (worldFrustum.Contains(mSceneObjects[i].worldBounds) != DISJOINT) { //проверяет, попадает ли в фрустум
             mVisibleObjects.push_back(i);
         }
     }
@@ -841,11 +841,11 @@ void DirectXApp::CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& 
     ++mOctreeNodesVisitedThisFrame;
     const OctreeNode& node = mOctreeNodes[nodeIndex];
 
-    if (!frustum.Intersects(node.bounds)) {
+    if (!frustum.Intersects(node.bounds)) { //если кубик полностью мимо - откидываем всю ветку
         return;
     }
 
-    if (frustum.Contains(node.bounds) == CONTAINS) {
+    if (frustum.Contains(node.bounds) == CONTAINS) {  // если кубик полностью внутри, то сразу все его объекты отрисовываем
         std::function<void(int)> gatherAll = [&](int idx) {
             if (idx < 0 || idx >= static_cast<int>(mOctreeNodes.size())) return;
             const OctreeNode& n = mOctreeNodes[idx];
@@ -868,13 +868,13 @@ void DirectXApp::CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& 
         if (frustum.Contains(mSceneObjects[objectIndex].worldBounds) != DISJOINT) {
             mVisibleObjects.push_back(objectIndex);
         }
-    }
+    } //отрисовываем что не "полностью мимо" в фрустуме
 
     for (int i = 0; i < 8; ++i) {
         if (node.children[i] != -1) {
             CollectVisibleFromOctree(node.children[i], frustum);
         }
-    }
+    } //запускаем рекурсию
 }
 
 void DirectXApp::UpdateWindowTitle()
