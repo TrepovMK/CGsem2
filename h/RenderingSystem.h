@@ -79,7 +79,7 @@ public:
 
     // Обновить константы пост-эффектов (вызывать каждый кадр из Update).
     void UpdatePostConstants(float totalTime);
-    void SetPostStrengths(float chromaticStrength, float vignetteStrength);
+    void SetPostStrengths(float chromaticStrength, float vignetteStrength, float outlineStrength, float outlineThreshold);
 
 private:
     bool CreateGBuffer(UINT width, UINT height);
@@ -129,6 +129,8 @@ private:
     std::unique_ptr<UploadBuffer<PostConstants>> mPostCB;
     float mChromaticStrength = 0.25f;
     float mVignetteStrength = 0.78f;
+    float mOutlineStrength = 1.0f;
+    float mOutlineThreshold = 0.05f;
 
     ComPtr<ID3D12Resource> mSceneTexture;
     ComPtr<ID3D12DescriptorHeap> mSceneRtvHeap;

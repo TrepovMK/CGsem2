@@ -663,13 +663,17 @@ void RenderingSystem::UpdatePostConstants(float totalTime)
     post.Time = totalTime;
     post.ChromaticStrength = mChromaticStrength;
     post.VignetteStrength = mVignetteStrength;
+    post.OutlineStrength = mOutlineStrength;
+    post.OutlineThreshold = mOutlineThreshold;
     mPostCB->CopyData(0, post);
 }
 
-void RenderingSystem::SetPostStrengths(float chromaticStrength, float vignetteStrength)
+void RenderingSystem::SetPostStrengths(float chromaticStrength, float vignetteStrength, float outlineStrength, float outlineThreshold)
 {
     mChromaticStrength = chromaticStrength;
     mVignetteStrength = vignetteStrength;
+    mOutlineStrength = outlineStrength;
+    mOutlineThreshold = outlineThreshold;
 }
 
 void RenderingSystem::Shutdown()

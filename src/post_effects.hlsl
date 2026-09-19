@@ -10,7 +10,9 @@ cbuffer PostConstants : register(b0)
     float gTime;
     float gChromaticStrength;
     float gVignetteStrength;
-    float3 gPadding;
+    float gOutlineStrength;
+    float gOutlineThreshold;
+    float2 gPadding;
 };
 
 struct VSOut
@@ -71,12 +73,63 @@ float3 ApplyVignette(float3 color, float2 uv)
     return color * lerp(1.0f, vignette, gVignetteStrength);
 }
 
+// Edge detection: резкие ребра по глубине и нормалям
+float3 ApplyOutline(float3 color, float2 uv)
+{
+    // Читаем глубину и нормаль в текущем пикселе
+    float centerDepth = gDepthTex.Sample(gLinearClamp, uv).r;
+    float3 centerNormal = gNormalTex.Sample(gLinearClamp, uv).xyz;
+    
+    // Пропускаем фон (depth == 1.0 = далеко/пусто)
+    if (centerDepth > 0.999f)
+        return color;
+
+    float edge = 0.0f;
+    float normalEdge = 0.0f;
+    
+    // Проверяем 4 соседа (kreuz pattern)
+    float2 offsets[4] = {
+        float2(gInvRenderTargetSize.x, 0.0f),
+        float2(-gInvRenderTargetSize.x, 0.0f),
+        float2(0.0f, gInvRenderTargetSize.y),
+        float2(0.0f, -gInvRenderTargetSize.y)
+    };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        float2 neighborUv = uv + offsets[i];
+        
+        // Граница текстуры
+        if (neighborUv.x < 0.0f || neighborUv.x > 1.0f ||
+            neighborUv.y < 0.0f || neighborUv.y > 1.0f)
+            continue;
+
+        float neighborDepth = gDepthTex.Sample(gLinearClamp, neighborUv).r;
+        float3 neighborNormal = gNormalTex.Sample(gLinearClamp, neighborUv).xyz;
+
+        // Ребро по глубине: большой скачок глубины
+        float depthDiff = abs(centerDepth - neighborDepth);
+        edge = max(edge, depthDiff);
+
+        // Ребро по нормалям: резкий сброс угла между поверхностями
+        float normalDiff = 1.0f - dot(normalize(centerNormal), normalize(neighborNormal));
+        normalEdge = max(normalEdge, normalDiff);
+    }
+
+    // Комбинированный порог
+    float isEdge = step(gOutlineThreshold, edge + normalEdge * 0.5f);
+    
+    // Красный аутлайн поверх цвета
+    return lerp(color, float3(1.0f, 0.0f, 0.0f), isEdge * gOutlineStrength);
+}
+
 float4 PS_PostEffects(VSOut input) : SV_Target
 {
     const float2 uv = input.TexC;
     float3 color = ApplyChromaticAberration(uv);
 
     color = ApplyVignette(color, uv);
+    color = ApplyOutline(color, uv);
 
     return float4(color, 1.0f);
 }

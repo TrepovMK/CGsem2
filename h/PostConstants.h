@@ -10,5 +10,7 @@ struct PostConstants
     float Time = 0.0f;
     float ChromaticStrength = 0.25f;
     float VignetteStrength = 0.78f;
-    DirectX::XMFLOAT3 Padding = { 0.0f, 0.0f, 0.0f };
+    float OutlineStrength = 1.0f;
+    float OutlineThreshold = 0.05f;
+    DirectX::XMFLOAT2 Padding = { 0.0f, 0.0f };
 };
