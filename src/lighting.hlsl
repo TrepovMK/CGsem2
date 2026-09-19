@@ -64,7 +64,8 @@ float3 ReconstructWorldPos(float2 texCoord, float depth, float4x4 invViewProj)
 }
 
 // Выбор каскада по линеаризованной глубине + PCF 3x3 через SampleCmp.
-float ComputeShadowFactor(float3 worldPos, float3 normalW, float depth)
+// Возвращает фактор затенения, номер каскада отдаёт через out (для отладочной раскраски).
+float ComputeShadowFactor(float3 worldPos, float3 normalW, float depth, out int cascadeIndexOut)
 {
     // Линеаризация глубины (near/far должны совпадать с CPU: 0.1 / 200).
     const float nearZ = 0.1f;
@@ -80,6 +81,7 @@ float ComputeShadowFactor(float3 worldPos, float3 normalW, float depth)
             break;
         }
     }
+    cascadeIndexOut = cascadeIndex;
 
     float4 shadowPos = mul(float4(worldPos, 1.0f), gLightViewProj[cascadeIndex]);
     float3 projCoords = shadowPos.xyz / max(shadowPos.w, 1e-5f);
@@ -147,7 +149,13 @@ float4 PS(PSInput pin) : SV_Target
         float diff = max(dot(normal, lightDir), 0.0f);
         result = diff * gLightColor * gLightIntensity * albedo.rgb;
         // Каскадные тени с PCF только для направленного света.
-        result *= ComputeShadowFactor(worldPos, normal, depth);
+        int cascadeIndex = 0;
+        result *= ComputeShadowFactor(worldPos, normal, depth, cascadeIndex);
+        // Отладочная раскраска каскадов (всегда включена): ближний — красный,
+        // средний — зелёный, дальний — синий. Тени остаются видны (умножение).
+        float3 cascadeColor = (cascadeIndex == 0) ? float3(1.0f, 0.25f, 0.25f)
+            : ((cascadeIndex == 1) ? float3(0.25f, 1.0f, 0.25f) : float3(0.35f, 0.5f, 1.0f));
+        result *= cascadeColor;
     }
     else if (gLightType == LIGHT_POINT)
     {

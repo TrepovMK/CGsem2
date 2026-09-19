@@ -44,7 +44,7 @@ RenderingSystem::~RenderingSystem()
 
 bool RenderingSystem::Initialize(UINT width, UINT height)
 {
-    return CreateGBuffer(width, height) && CreateLightingResources() && CreateShadowResources() && CreateDebugResources();
+    return CreateGBuffer(width, height) && CreateLightingResources() && CreateShadowResources();
 }
 
 bool RenderingSystem::CreateGBuffer(UINT width, UINT height)
@@ -357,9 +357,7 @@ void RenderingSystem::LightingPass(
     int& currBackBufferIndex,
     IDXGISwapChain* swapChain,
     UploadBuffer<CameraConstants>* cameraCB,
-    UploadBuffer<ShadowConstants>* shadowCB,
-    float nearZ,
-    float farZ)
+    UploadBuffer<ShadowConstants>* shadowCB)
 {
     ThrowIfFailed(mCommandAllocator->Reset());
     ThrowIfFailed(mCommandList->Reset(mCommandAllocator, mLightingPSO.Get()));
@@ -403,8 +401,6 @@ void RenderingSystem::LightingPass(
         mCommandList->DrawInstanced(3, 1, 0, 0);
     }
 
-    RenderDebugOverlays(viewport, nearZ, farZ);
-
     barrier = MakeTransition(
         backBuffer,
         D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -434,8 +430,6 @@ void RenderingSystem::Shutdown()
     mLightingRootSignature.Reset();
     mShadowPSO.Reset();
     mShadowRootSignature.Reset();
-    mDebugPSO.Reset();
-    mDebugRootSignature.Reset();
 }
 
 void RenderingSystem::FlushCommandQueue()
@@ -452,156 +446,3 @@ void RenderingSystem::FlushCommandQueue()
     }
 }
 
-bool RenderingSystem::CreateDebugResources()
-{
-    auto vsDebug = d3dUtil::CompileShader(L"../src/debug.hlsl", nullptr, "VS", "vs_5_0");
-    auto psDebug = d3dUtil::CompileShader(L"../src/debug.hlsl", nullptr, "PS", "ps_5_0");
-    if (!vsDebug || !psDebug)
-    {
-        return false;
-    }
-
-    D3D12_DESCRIPTOR_RANGE srvRange = {};
-    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srvRange.NumDescriptors = 1;
-    srvRange.BaseShaderRegister = 0;
-    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER rootParams[2] = {};
-    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
-    rootParams[0].DescriptorTable.pDescriptorRanges = &srvRange;
-    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParams[1].Constants.Num32BitValues = 3;
-    rootParams[1].Constants.ShaderRegister = 0;
-    rootParams[1].Constants.RegisterSpace = 0;
-    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC sampler = {};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ShaderRegister = 0;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-
-    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-    rootSigDesc.NumParameters = 2;
-    rootSigDesc.pParameters = rootParams;
-    rootSigDesc.NumStaticSamplers = 1;
-    rootSigDesc.pStaticSamplers = &sampler;
-    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-
-    ComPtr<ID3DBlob> serializedRootSig;
-    ComPtr<ID3DBlob> errorBlob;
-    ThrowIfFailed(D3D12SerializeRootSignature(
-        &rootSigDesc,
-        D3D_ROOT_SIGNATURE_VERSION_1,
-        serializedRootSig.GetAddressOf(),
-        errorBlob.GetAddressOf()));
-
-    ThrowIfFailed(mDevice->CreateRootSignature(
-        0,
-        serializedRootSig->GetBufferPointer(),
-        serializedRootSig->GetBufferSize(),
-        IID_PPV_ARGS(&mDebugRootSignature)));
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-    psoDesc.VS = { vsDebug->GetBufferPointer(), vsDebug->GetBufferSize() };
-    psoDesc.PS = { psDebug->GetBufferPointer(), psDebug->GetBufferSize() };
-    psoDesc.pRootSignature = mDebugRootSignature.Get();
-    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    psoDesc.NumRenderTargets = 1;
-    psoDesc.RTVFormats[0] = mBackBufferFormat;
-    psoDesc.SampleDesc.Count = 1;
-    psoDesc.SampleMask = UINT_MAX;
-    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
-    psoDesc.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
-    psoDesc.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
-    psoDesc.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
-    psoDesc.RasterizerState.DepthClipEnable = TRUE;
-    psoDesc.RasterizerState.MultisampleEnable = FALSE;
-    psoDesc.RasterizerState.AntialiasedLineEnable = FALSE;
-    psoDesc.RasterizerState.ForcedSampleCount = 0;
-    psoDesc.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-    psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
-    psoDesc.BlendState.IndependentBlendEnable = FALSE;
-    psoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
-    psoDesc.BlendState.RenderTarget[0].LogicOpEnable = FALSE;
-    psoDesc.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
-    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    psoDesc.DepthStencilState.DepthEnable = FALSE;
-    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    psoDesc.DepthStencilState.StencilEnable = FALSE;
-
-    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mDebugPSO)));
-
-    return true;
-}
-
-void RenderingSystem::RenderDebugOverlays(const D3D12_VIEWPORT& fullViewport, float nearZ, float farZ)
-{
-    if (!mDebugPSO || !mGBuffer)
-    {
-        return;
-    }
-
-    mCommandList->SetPipelineState(mDebugPSO.Get());
-    mCommandList->SetGraphicsRootSignature(mDebugRootSignature.Get());
-
-    ID3D12DescriptorHeap* heaps[] = { mGBuffer->GetSrvHeap() };
-    mCommandList->SetDescriptorHeaps(1, heaps);
-
-    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    const float w = fullViewport.Width;
-    const float h = fullViewport.Height;
-
-    const float margin = 12.0f;
-    const float gap = 8.0f;
-    const float minSize = 64.0f;
-    const float proportionalSize = (w * 0.18f < h * 0.28f) ? (w * 0.18f) : (h * 0.28f);
-    const float size = (proportionalSize > minSize) ? proportionalSize : minSize;
-
-    const float thumbCount = static_cast<float>(GBuffer::GBUFFER_COUNT);
-    const float totalWidth = thumbCount * size + (thumbCount - 1.0f) * gap;
-    const float startX = w - margin - totalWidth;
-    const float y = h - margin - size;
-
-    for (UINT i = 0; i < GBuffer::GBUFFER_COUNT; ++i)
-    {
-        D3D12_VIEWPORT thumbViewport = {};
-        thumbViewport.TopLeftX = startX + i * (size + gap);
-        thumbViewport.TopLeftY = y;
-        thumbViewport.Width = size;
-        thumbViewport.Height = size;
-        thumbViewport.MinDepth = 0.0f;
-        thumbViewport.MaxDepth = 1.0f;
-
-        D3D12_RECT thumbScissor = {
-            static_cast<LONG>(thumbViewport.TopLeftX),
-            static_cast<LONG>(thumbViewport.TopLeftY),
-            static_cast<LONG>(thumbViewport.TopLeftX + thumbViewport.Width),
-            static_cast<LONG>(thumbViewport.TopLeftY + thumbViewport.Height)
-        };
-
-        mCommandList->RSSetViewports(1, &thumbViewport);
-        mCommandList->RSSetScissorRects(1, &thumbScissor);
-
-        D3D12_GPU_DESCRIPTOR_HANDLE srvHandle = mGBuffer->GetSrvHeap()->GetGPUDescriptorHandleForHeapStart();
-        srvHandle.ptr += i * mGBuffer->GetSrvDescriptorSize();
-        mCommandList->SetGraphicsRootDescriptorTable(0, srvHandle);
-
-        UINT debugConstants[3] = { i, 0, 0 };
-        memcpy(&debugConstants[1], &nearZ, sizeof(float));
-        memcpy(&debugConstants[2], &farZ, sizeof(float));
-        mCommandList->SetGraphicsRoot32BitConstants(1, 3, debugConstants, 0);
-
-        mCommandList->DrawInstanced(3, 1, 0, 0);
-    }
-}

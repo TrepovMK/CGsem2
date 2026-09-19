@@ -57,9 +57,7 @@ public:
         int& currBackBufferIndex,
         IDXGISwapChain* swapChain,
         UploadBuffer<CameraConstants>* cameraCB,
-        UploadBuffer<ShadowConstants>* shadowCB,
-        float nearZ,
-        float farZ);
+        UploadBuffer<ShadowConstants>* shadowCB);
 
     GBuffer* GetGBuffer() const { return mGBuffer.get(); }
     ID3D12PipelineState* GetShadowPSO() const { return mShadowPSO.Get(); }
@@ -69,8 +67,6 @@ private:
     bool CreateGBuffer(UINT width, UINT height);
     bool CreateLightingResources();
     bool CreateShadowResources();
-    bool CreateDebugResources();
-    void RenderDebugOverlays(const D3D12_VIEWPORT& fullViewport, float nearZ, float farZ);
 
     ID3D12Device* mDevice;
     ID3D12CommandQueue* mCommandQueue;
@@ -87,6 +83,4 @@ private:
     ComPtr<ID3D12RootSignature> mLightingRootSignature;
     ComPtr<ID3D12PipelineState> mShadowPSO;
     ComPtr<ID3D12RootSignature> mShadowRootSignature;
-    ComPtr<ID3D12PipelineState> mDebugPSO;
-    ComPtr<ID3D12RootSignature> mDebugRootSignature;
 };
