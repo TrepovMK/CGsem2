@@ -190,3 +190,34 @@ GBufferOut PS_Geometry(PixelIn pin)
 
     return pout;
 }
+
+// ---- Debug lines for minimap (top-down view: frustum, object boxes, octree) ----
+cbuffer DebugLineConstants : register(b0)
+{
+    float4x4 gDebugViewProj;
+};
+
+struct DebugVSInput
+{
+    float3 PosL : POSITION;
+    float3 Color : COLOR;
+};
+
+struct DebugPSInput
+{
+    float4 PosH : SV_POSITION;
+    float3 Color : COLOR;
+};
+
+DebugPSInput VS_DebugLine(DebugVSInput vin)
+{
+    DebugPSInput vout;
+    vout.PosH = mul(float4(vin.PosL, 1.0f), gDebugViewProj);
+    vout.Color = vin.Color;
+    return vout;
+}
+
+float4 PS_DebugLine(DebugPSInput pin) : SV_TARGET
+{
+    return float4(pin.Color, 1.0f);
+}

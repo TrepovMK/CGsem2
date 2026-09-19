@@ -117,6 +117,33 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device) {
             serialized->GetBufferSize(),
             IID_PPV_ARGS(&mLightingRootSignature)));
     }
+
+    {
+        // Debug lines: one root constant (16 floats = ViewProj matrix) for VS.
+        CD3DX12_ROOT_PARAMETER param;
+        param.InitAsConstants(16, 0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(
+            1,
+            &param,
+            0,
+            nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serialized;
+        ComPtr<ID3DBlob> errors;
+        ThrowIfFailed(D3D12SerializeRootSignature(
+            &desc,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &serialized,
+            &errors));
+
+        ThrowIfFailed(device->CreateRootSignature(
+            0,
+            serialized->GetBufferPointer(),
+            serialized->GetBufferSize(),
+            IID_PPV_ARGS(&mDebugRootSignature)));
+    }
 }
 
 void RenderingSystem::BuildPSOs(ID3D12Device* device) {
@@ -203,6 +230,37 @@ void RenderingSystem::BuildPSOs(ID3D12Device* device) {
     lightDesc.SampleDesc.Count = 1;
 
     ThrowIfFailed(device->CreateGraphicsPipelineState(&lightDesc, IID_PPV_ARGS(&mLightingPSO)));
+
+    {
+        // Debug line PSO: draws directly to the back buffer, no depth test.
+        auto vsDebug = d3dUtil::CompileShader(L"../src/shaders.hlsl", nullptr, "VS_DebugLine", "vs_5_0");
+        auto psDebug = d3dUtil::CompileShader(L"../src/shaders.hlsl", nullptr, "PS_DebugLine", "ps_5_0");
+
+        std::array<D3D12_INPUT_ELEMENT_DESC, 2> debugLayout = {
+            D3D12_INPUT_ELEMENT_DESC{"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            D3D12_INPUT_ELEMENT_DESC{"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        };
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC debugDesc = {};
+        debugDesc.InputLayout = {debugLayout.data(), static_cast<UINT>(debugLayout.size())};
+        debugDesc.pRootSignature = mDebugRootSignature.Get();
+        debugDesc.VS = {vsDebug->GetBufferPointer(), vsDebug->GetBufferSize()};
+        debugDesc.PS = {psDebug->GetBufferPointer(), psDebug->GetBufferSize()};
+        debugDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        debugDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        debugDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        debugDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        debugDesc.DepthStencilState.DepthEnable = FALSE;
+        debugDesc.DepthStencilState.StencilEnable = FALSE;
+        debugDesc.SampleMask = UINT_MAX;
+        debugDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+        debugDesc.NumRenderTargets = 1;
+        debugDesc.RTVFormats[0] = mBackBufferFormat;
+        debugDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        debugDesc.SampleDesc.Count = 1;
+
+        ThrowIfFailed(device->CreateGraphicsPipelineState(&debugDesc, IID_PPV_ARGS(&mDebugPSO)));
+    }
 }
 
 void RenderingSystem::Shutdown()
@@ -214,6 +272,8 @@ void RenderingSystem::Shutdown()
     mTessellationPSO.Reset();
     mTessellationWirePSO.Reset();
     mLightingPSO.Reset();
+    mDebugPSO.Reset();
+    mDebugRootSignature.Reset();
     if (mGBuffer)
     {
         mGBuffer->Shutdown();

@@ -26,6 +26,8 @@ public:
     ID3D12PipelineState* GetTessellationPSO() const { return mTessellationPSO.Get(); }
     ID3D12PipelineState* GetTessellationWirePSO() const { return mTessellationWirePSO.Get(); }
     ID3D12PipelineState* GetLightingPSO() const { return mLightingPSO.Get(); }
+    ID3D12RootSignature* GetDebugRootSignature() const { return mDebugRootSignature.Get(); }
+    ID3D12PipelineState* GetDebugPSO() const { return mDebugPSO.Get(); }
 
     GBuffer* GetGBuffer() const { return mGBuffer.get(); }
 
@@ -48,6 +50,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessellationPSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTessellationWirePSO;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO;
+
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mDebugRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mDebugPSO;
 
     std::unique_ptr<GBuffer> mGBuffer;
 };

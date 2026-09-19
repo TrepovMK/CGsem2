@@ -76,6 +76,17 @@ private:
     void CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& frustum);
     void UpdateWindowTitle();
 
+    struct DebugLineVertex {
+        XMFLOAT3 pos = {0, 0, 0};
+        XMFLOAT3 color = {1, 1, 1};
+    };
+    void BuildDebugLines();
+    void DrawMinimap();
+    XMMATRIX GetMinimapViewProj(float miniAspect) const;
+    void AppendBoxLines(const BoundingBox& box, const XMFLOAT3& color);
+    void AppendOctreeNodeLines(int nodeIndex, int depth);
+    void EnsureDebugBuffer(size_t neededVerts);
+
     D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView() const;
     D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView() const { return mDsvHeap->GetCPUDescriptorHandleForHeapStart(); }
     ID3D12Resource* CurrentBackBuffer() const;
@@ -133,6 +144,7 @@ private:
         BoundingBox bounds;
         std::vector<unsigned int> objectIndices;
         int children[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+        bool subdivided = false;
     };
 
     static constexpr unsigned int SwapChainBufferCount = 2;
@@ -180,6 +192,17 @@ private:
     std::vector<unsigned int> mVisibleObjects;
 
     std::vector<OctreeNode> mOctreeNodes;
+
+    // Minimap (top-down debug view): frustum outline + object boxes + octree.
+    bool mMinimapEnabled = true;
+    bool mVWasDown = false;
+    BoundingFrustum mLastWorldFrustum;
+    bool mHasLastFrustum = false;
+    std::vector<DebugLineVertex> mDebugLines;
+    ComPtr<ID3D12Resource> mDebugVB;
+    DebugLineVertex* mDebugVBMapped = nullptr;
+    size_t mDebugVBCapacity = 0;
+    D3D12_VERTEX_BUFFER_VIEW mDebugVBView = {};
 
     int mObjectsTestedThisFrame = 0;
     int mOctreeNodesVisitedThisFrame = 0;

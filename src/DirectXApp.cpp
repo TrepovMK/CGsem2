@@ -729,10 +729,13 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
 
     if (static_cast<int>(mOctreeNodes[nodeIndex].objectIndices.size()) >= kMaxLeafObjects && // проверяем, больше ли 28 объектов и уровень глубины
         depth < kMaxOctreeDepth) {
-        if (mOctreeNodes[nodeIndex].children[0] == -1) {
+        if (!mOctreeNodes[nodeIndex].subdivided) {
             XMFLOAT3 parentCenter = mOctreeNodes[nodeIndex].center;
             XMFLOAT3 childExtents(mOctreeNodes[nodeIndex].extents.x * 0.5f, mOctreeNodes[nodeIndex].extents.y * 0.5f, mOctreeNodes[nodeIndex].extents.z * 0.5f); //считаем размер некст кубика который в два раза меньше прошлого
             for (int i = 0; i < 8; ++i) {
+                if (mOctreeNodes[nodeIndex].children[i] != -1) {
+                    continue; // лениво созданный ребенок уже есть — не затираем его
+                }
                 OctreeNode child; //создаем восемь детев
                 child.extents = childExtents;
                 child.center = XMFLOAT3(
@@ -743,6 +746,7 @@ void DirectXApp::InsertObjectIntoOctree(unsigned int objectIndex, int nodeIndex,
                 mOctreeNodes[nodeIndex].children[i] = static_cast<int>(mOctreeNodes.size());
                 mOctreeNodes.push_back(std::move(child)); // кладем дете в куб и запоминаем его индекс
             }
+            mOctreeNodes[nodeIndex].subdivided = true;
 
             auto storedObjects = mOctreeNodes[nodeIndex].objectIndices; // теперь мы достаем объекты из биг куба и будем распихивать по детям
             mOctreeNodes[nodeIndex].objectIndices.clear();
@@ -803,6 +807,15 @@ void DirectXApp::CollectVisibleObjects() //лаба 4
         static_cast<float>(mClientWidth) / static_cast<float>(mClientHeight),
         0.1f, 5000.0f);
 
+    // Frustum is always built so the minimap can draw it even with culling OFF.
+    BoundingFrustum viewFrustum;
+    BoundingFrustum::CreateFromMatrix(viewFrustum, proj);
+    BoundingFrustum worldFrustum;
+    const XMMATRIX invView = XMMatrixInverse(nullptr, view);
+    viewFrustum.Transform(worldFrustum, invView);
+    mLastWorldFrustum = worldFrustum;
+    mHasLastFrustum = true;
+
     if (!mFrustumCullingEnabled) {
         mVisibleObjects.reserve(mSceneObjects.size());
         for (unsigned int i = 0; i < static_cast<unsigned int>(mSceneObjects.size()); ++i) {
@@ -811,12 +824,6 @@ void DirectXApp::CollectVisibleObjects() //лаба 4
         mObjectsTestedThisFrame = static_cast<unsigned int>(mSceneObjects.size());
         return;
     }
-
-    BoundingFrustum viewFrustum;
-    BoundingFrustum::CreateFromMatrix(viewFrustum, proj);
-    BoundingFrustum worldFrustum;
-    const XMMATRIX invView = XMMatrixInverse(nullptr, view);
-    viewFrustum.Transform(worldFrustum, invView);
 
     if (mOctreeCullingEnabled && !mOctreeNodes.empty()) {
         CollectVisibleFromOctree(0, worldFrustum);
@@ -877,6 +884,211 @@ void DirectXApp::CollectVisibleFromOctree(int nodeIndex, const BoundingFrustum& 
     } //запускаем рекурсию
 }
 
+void DirectXApp::AppendBoxLines(const BoundingBox& box, const XMFLOAT3& color)
+{
+    // 8 corners of AABB, 12 edges -> 24 line vertices.
+    const float cx = box.Center.x, cy = box.Center.y, cz = box.Center.z;
+    const float ex = box.Extents.x, ey = box.Extents.y, ez = box.Extents.z;
+    XMFLOAT3 c[8] = {
+        {cx - ex, cy - ey, cz - ez}, {cx + ex, cy - ey, cz - ez},
+        {cx + ex, cy + ey, cz - ez}, {cx - ex, cy + ey, cz - ez},
+        {cx - ex, cy - ey, cz + ez}, {cx + ex, cy - ey, cz + ez},
+        {cx + ex, cy + ey, cz + ez}, {cx - ex, cy + ey, cz + ez},
+    };
+    static const int edges[24] = {
+        0, 1, 1, 2, 2, 3, 3, 0, // near rect
+        4, 5, 5, 6, 6, 7, 7, 4, // far rect
+        0, 4, 1, 5, 2, 6, 3, 7  // connectors
+    };
+    for (int i = 0; i < 24; ++i) {
+        DebugLineVertex v;
+        v.pos = c[edges[i]];
+        v.color = color;
+        mDebugLines.push_back(v);
+    }
+}
+
+void DirectXApp::AppendOctreeNodeLines(int nodeIndex, int depth)
+{
+    // Draw only first 3 levels so the minimap stays readable.
+    static constexpr int kMinimapMaxDepth = 3;
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(mOctreeNodes.size())) return;
+    if (depth > kMinimapMaxDepth) return;
+    const OctreeNode& node = mOctreeNodes[nodeIndex];
+    AppendBoxLines(node.bounds, XMFLOAT3(0.0f, 1.0f, 1.0f)); // cyan = octree
+    for (int i = 0; i < 8; ++i) {
+        if (node.children[i] != -1) AppendOctreeNodeLines(node.children[i], depth + 1);
+    }
+}
+
+void DirectXApp::EnsureDebugBuffer(size_t neededVerts)
+{
+    if (neededVerts <= mDebugVBCapacity && mDebugVB) return;
+    if (mDebugVB) {
+        mDebugVB->Unmap(0, nullptr);
+        mDebugVB.Reset();
+        mDebugVBMapped = nullptr;
+        mDebugVBCapacity = 0;
+    }
+    size_t cap = (std::max)(neededVerts, static_cast<size_t>(4096));
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = cap * sizeof(DebugLineVertex);
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ThrowIfFailed(device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mDebugVB)));
+    ThrowIfFailed(mDebugVB->Map(0, nullptr, reinterpret_cast<void**>(&mDebugVBMapped)));
+    mDebugVBCapacity = cap;
+
+    mDebugVBView.BufferLocation = mDebugVB->GetGPUVirtualAddress();
+    mDebugVBView.StrideInBytes = sizeof(DebugLineVertex);
+    mDebugVBView.SizeInBytes = static_cast<UINT>(cap * sizeof(DebugLineVertex));
+}
+
+XMMATRIX DirectXApp::GetMinimapViewProj(float miniAspect) const
+{
+    // Top-down ortho camera covering the whole scene.
+    BoundingBox sceneBox;
+    bool hasBox = false;
+    if (!mOctreeNodes.empty()) {
+        sceneBox = mOctreeNodes[0].bounds;
+        hasBox = true;
+    } else if (!mSceneObjects.empty()) {
+        sceneBox = mSceneObjects[0].worldBounds;
+        for (size_t i = 1; i < mSceneObjects.size(); ++i)
+            BoundingBox::CreateMerged(sceneBox, sceneBox, mSceneObjects[i].worldBounds);
+        hasBox = true;
+    }
+    XMFLOAT3 center = {0, 0, 0};
+    float ex = 30.0f, ey = 10.0f, ez = 30.0f;
+    if (hasBox) {
+        center = sceneBox.Center;
+        ex = (std::max)(sceneBox.Extents.x, 1.0f);
+        ey = (std::max)(sceneBox.Extents.y, 1.0f);
+        ez = (std::max)(sceneBox.Extents.z, 1.0f);
+    }
+    const float h = (std::max)(ex, (std::max)(ey, ez)) * 3.0f + 20.0f;
+    const XMVECTOR eye = XMVectorSet(center.x, center.y + h, center.z, 0.0f);
+    const XMVECTOR dir = XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f);
+    const XMVECTOR up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    const XMMATRIX view = XMMatrixLookToLH(eye, dir, up);
+
+    const float fitW = ex * 1.15f;
+    const float fitH = ez * 1.15f;
+    const float halfW = (std::max)(fitW, fitH * miniAspect);
+    const float halfH = halfW / miniAspect;
+    const XMMATRIX proj = XMMatrixOrthographicLH(halfW * 2.0f, halfH * 2.0f, 0.1f, h * 2.0f + 500.0f);
+    return view * proj;
+}
+
+void DirectXApp::BuildDebugLines()
+{
+    mDebugLines.clear();
+    if (mSceneObjects.empty()) return;
+
+    // Visibility lookup: green = drawn, red = culled away.
+    std::vector<char> isVis(mSceneObjects.size(), 0);
+    for (unsigned int idx : mVisibleObjects) {
+        if (idx < isVis.size()) isVis[idx] = 1;
+    }
+
+    if (mHasLastFrustum) {
+        XMFLOAT3 corners[8];
+        mLastWorldFrustum.GetCorners(corners);
+        static const int edges[24] = {
+            0, 1, 1, 2, 2, 3, 3, 0,
+            4, 5, 5, 6, 6, 7, 7, 4,
+            0, 4, 1, 5, 2, 6, 3, 7
+        };
+        for (int i = 0; i < 24; ++i) {
+            DebugLineVertex v;
+            v.pos = corners[edges[i]];
+            v.color = XMFLOAT3(1.0f, 1.0f, 0.0f); // yellow = frustum
+            mDebugLines.push_back(v);
+        }
+    }
+
+    // Camera marker: white cross + look direction.
+    const float markLen = (std::max)(1.0f, (mLastWorldFrustum.Near * 0.5f));
+    const XMFLOAT3 cp = mEyePos;
+    const XMVECTOR fwd = XMVector3Normalize(XMVectorSet(
+        std::cos(mPitch) * std::sin(mYaw), std::sin(mPitch),
+        std::cos(mPitch) * std::cos(mYaw), 0.0f));
+    XMFLOAT3 f;
+    XMStoreFloat3(&f, fwd);
+    const XMFLOAT3 white(1.0f, 1.0f, 1.0f);
+    auto pushSeg = [&](XMFLOAT3 a, XMFLOAT3 b) {
+        mDebugLines.push_back({a, white});
+        mDebugLines.push_back({b, white});
+    };
+    pushSeg({cp.x - markLen, cp.y, cp.z}, {cp.x + markLen, cp.y, cp.z});
+    pushSeg({cp.x, cp.y - markLen, cp.z}, {cp.x, cp.y + markLen, cp.z});
+    pushSeg({cp.x, cp.y, cp.z - markLen}, {cp.x, cp.y, cp.z + markLen});
+    pushSeg(cp, {cp.x + f.x * markLen * 4.0f, cp.y + f.y * markLen * 4.0f, cp.z + f.z * markLen * 4.0f});
+
+    for (size_t i = 0; i < mSceneObjects.size(); ++i) {
+        AppendBoxLines(mSceneObjects[i].worldBounds,
+            isVis[i] ? XMFLOAT3(0.0f, 1.0f, 0.0f) : XMFLOAT3(1.0f, 0.0f, 0.0f));
+    }
+
+    if (!mOctreeNodes.empty()) {
+        AppendOctreeNodeLines(0, 0);
+    }
+}
+
+void DirectXApp::DrawMinimap()
+{
+    if (!mMinimapEnabled || mSceneObjects.empty() || !mHasLastFrustum) return;
+
+    BuildDebugLines();
+    if (mDebugLines.empty()) return;
+    EnsureDebugBuffer(mDebugLines.size());
+    memcpy(mDebugVBMapped, mDebugLines.data(), mDebugLines.size() * sizeof(DebugLineVertex));
+
+    const float miniW = static_cast<float>(mClientWidth) * 0.32f;
+    const float miniH = static_cast<float>(mClientHeight) * 0.36f;
+    D3D12_VIEWPORT miniVp = {};
+    miniVp.TopLeftX = 12.0f;
+    miniVp.TopLeftY = 12.0f;
+    miniVp.Width = miniW;
+    miniVp.Height = miniH;
+    miniVp.MinDepth = 0.0f;
+    miniVp.MaxDepth = 1.0f;
+    D3D12_RECT miniScissor = {
+        12, 12,
+        static_cast<LONG>(12.0f + miniW),
+        static_cast<LONG>(12.0f + miniH)
+    };
+
+    const XMMATRIX vp = GetMinimapViewProj(miniW / miniH);
+    XMFLOAT4X4 vpT;
+    XMStoreFloat4x4(&vpT, XMMatrixTranspose(vp));
+
+    auto rtv = CurrentBackBufferView();
+    mCommandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    mCommandList->RSSetViewports(1, &miniVp);
+    mCommandList->RSSetScissorRects(1, &miniScissor);
+    mCommandList->SetGraphicsRootSignature(mRenderingSystem->GetDebugRootSignature());
+    mCommandList->SetPipelineState(mRenderingSystem->GetDebugPSO());
+    mCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    D3D12_VERTEX_BUFFER_VIEW vbView = mDebugVBView;
+    vbView.SizeInBytes = static_cast<UINT>(mDebugLines.size() * sizeof(DebugLineVertex));
+    mCommandList->IASetVertexBuffers(0, 1, &vbView);
+    mCommandList->SetGraphicsRoot32BitConstants(0, 16, &vpT, 0);
+    mCommandList->DrawInstanced(static_cast<UINT>(mDebugLines.size()), 1, 0, 0);
+
+    SetViewportAndScissor();
+}
+
 void DirectXApp::UpdateWindowTitle()
 {
     std::wostringstream ws;
@@ -896,6 +1108,7 @@ void DirectXApp::UpdateWindowTitle()
     ws << L" | T: Anim " << (mAnimateTextures ? L"ON" : L"OFF");
     ws << L" | C: Frustum " << (mFrustumCullingEnabled ? L"ON" : L"OFF");
     ws << L" | O: Octree " << (mOctreeCullingEnabled ? L"ON" : L"OFF");
+    ws << L" | V: Minimap " << (mMinimapEnabled ? L"ON" : L"OFF");
 
     ws << L" | Visible " << mVisibleObjects.size() << L"/" << mSceneObjects.size();
     ws << L" | Tested " << mObjectsTestedThisFrame;
@@ -1542,6 +1755,7 @@ void DirectXApp::Update(const Timer& gt)
     const bool rDown = (GetAsyncKeyState('R') & 0x8000) != 0;
     const bool cDown = (GetAsyncKeyState('C') & 0x8000) != 0;
     const bool oDown = (GetAsyncKeyState('O') & 0x8000) != 0;
+    const bool vDown = (GetAsyncKeyState('V') & 0x8000) != 0;
     const bool digit1Down = (GetAsyncKeyState('1') & 0x8000) != 0;
     const bool digit2Down = (GetAsyncKeyState('2') & 0x8000) != 0;
     const bool digit3Down = (GetAsyncKeyState('3') & 0x8000) != 0;
@@ -1573,6 +1787,12 @@ void DirectXApp::Update(const Timer& gt)
         mTitleDirty = true;
     }
     mOWasDown = oDown;
+
+    if (vDown && !mVWasDown) {
+        mMinimapEnabled = !mMinimapEnabled;
+        mTitleDirty = true;
+    }
+    mVWasDown = vDown;
 
     if (digit1Down && !mDigit1WasDown) {
         ActivateScene(0, true);
@@ -1737,7 +1957,9 @@ void DirectXApp::Draw(const Timer& gt)
                                              mTextureResources[mFallbackDisplacementIndex].srvHeapIndex;
             const bool wireframeDebug = (mDebugViewMode == 3);
 
-            if (hasDisplacement) {
+            // Tessellation disabled: always use non-tessellated geometry path.
+            (void)hasDisplacement;
+            if (false) {
                 mCommandList->SetPipelineState(wireframeDebug
                                                    ? mRenderingSystem->GetTessellationWirePSO()
                                                    : mRenderingSystem->GetTessellationPSO());
@@ -1814,6 +2036,8 @@ void DirectXApp::Draw(const Timer& gt)
         ++lightCbIndex;
     }
 
+    DrawMinimap();
+
     auto bbToPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -1858,6 +2082,12 @@ void DirectXApp::Shutdown()
     mVertexBufferUploader.Reset();
     mIndexBufferGPU.Reset();
     mIndexBufferUploader.Reset();
+    if (mDebugVB) {
+        mDebugVB->Unmap(0, nullptr);
+        mDebugVB.Reset();
+        mDebugVBMapped = nullptr;
+        mDebugVBCapacity = 0;
+    }
     mCommandList.Reset();
     mFence.Reset();
     mDirectCmdListAlloc.Reset();
